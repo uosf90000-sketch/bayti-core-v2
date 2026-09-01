@@ -27,6 +27,8 @@ export interface RenderOpening {
   hostWallId: string;
   centerLine: CanonicalOpening["centerLine"];
   widthMeters: number;
+  connectedRoomIds: string[];
+  connectsToExterior: boolean | null;
   confidence: number;
 }
 
@@ -34,6 +36,8 @@ export interface UnresolvedRenderOpening {
   id: string;
   kind: OpeningKind;
   centerLine: CanonicalOpening["centerLine"];
+  connectedRoomIds: string[];
+  connectsToExterior: boolean | null;
   reasons: Array<"missing-host-wall" | "missing-physical-width">;
 }
 
@@ -46,7 +50,7 @@ export interface RenderRoomSurface {
 }
 
 export interface BaytiRenderContract {
-  schemaVersion: "1.0";
+  schemaVersion: "1.1";
   coordinateSystem: "full-page-normalized-0..1";
   /**
    * Horizontal geometry only. The renderer/design layer must provide ceiling height,
@@ -92,6 +96,8 @@ export function buildBaytiRenderContract(
         id: opening.id,
         kind: opening.kind,
         centerLine: opening.centerLine,
+        connectedRoomIds: opening.connectedRoomIds,
+        connectsToExterior: opening.connectsToExterior,
         reasons,
       });
       continue;
@@ -103,12 +109,15 @@ export function buildBaytiRenderContract(
       hostWallId,
       centerLine: opening.centerLine,
       widthMeters,
+      connectedRoomIds: opening.connectedRoomIds,
+      connectsToExterior: opening.connectsToExterior,
       confidence: opening.confidence.score,
     });
   }
 
   const notes = [
     "Wall footprints are authoritative horizontal solids; polygon-only walls must be preserved during extrusion.",
+    "Opening-to-room connectivity is provider-backed only; missing topology stays unknown rather than being inferred by the renderer.",
     "Vertical dimensions are intentionally not inferred by Bayti Core V2.",
   ];
   if (unresolvedOpenings.length > 0) {
@@ -118,7 +127,7 @@ export function buildBaytiRenderContract(
   }
 
   return {
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     coordinateSystem: "full-page-normalized-0..1",
     verticalDimensions: "consumer-supplied",
     scale: plan.scale,
