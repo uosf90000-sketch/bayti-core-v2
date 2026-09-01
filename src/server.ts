@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { analyzeBaytiCore, type BaytiCoreAnalysisResult, type VerifierMode } from "./core.js";
-import { IdempotencyRegistry } from "./idempotency.js";
+import { FileIdempotencyStore, IdempotencyRegistry } from "./idempotency.js";
 
 const DEFAULT_MAX_BODY_BYTES = 35 * 1024 * 1024;
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
@@ -13,8 +13,16 @@ const IDEMPOTENCY_TTL_MS = Number.parseInt(
   process.env.BAYTI_CORE_IDEMPOTENCY_TTL_MS ?? String(30 * 60_000),
   10,
 );
+const IDEMPOTENCY_DIR = process.env.BAYTI_CORE_IDEMPOTENCY_DIR?.trim() || null;
+const REQUIRE_PERSISTENT_IDEMPOTENCY = /^(1|true|yes)$/i.test(
+  process.env.BAYTI_CORE_REQUIRE_PERSISTENT_IDEMPOTENCY?.trim() ?? "false",
+);
 
-const analysisRegistry = new IdempotencyRegistry<BaytiCoreAnalysisResult>(IDEMPOTENCY_TTL_MS);
+const analysisRegistry = new IdempotencyRegistry<BaytiCoreAnalysisResult>(
+  IDEMPOTENCY_TTL_MS,
+  () => Date.now(),
+  IDEMPOTENCY_DIR ? new FileIdempotencyStore<BaytiCoreAnalysisResult>(IDEMPOTENCY_DIR) : undefined,
+);
 
 interface AnalyzeRequestBody {
   fileName: string;
@@ -197,6 +205,14 @@ function safeError(error: unknown): { status: number; code: string; message: str
       message: "Idempotency key was already used for a different analysis request.",
     };
   }
+  if (message === "IDEMPOTENCY_REQUEST_IN_PROGRESS_OR_INTERRUPTED") {
+    return {
+      status: 409,
+      code: message,
+      message:
+        "This paid analysis key is still pending or was interrupted. It will not be run again automatically; inspect the prior run before intentionally using a new key.",
+    };
+  }
   if (
     message.startsWith("INVALID_") ||
     message === "EMPTY_REQUEST_BODY" ||
@@ -225,7 +241,8 @@ const server = createServer(async (request, response) => {
       {
         status: "ok",
         service: "bayti-core-v2",
-        version: "0.4.0",
+        version: "0.5.0",
+        idempotencyMode: analysisRegistry.mode,
       },
       commonHeaders,
     );
@@ -238,7 +255,22 @@ const server = createServer(async (request, response) => {
     );
     const replicateConfigured = Boolean(process.env.REPLICATE_API_TOKEN?.trim());
     const apiKeyConfigured = Boolean(process.env.BAYTI_CORE_API_KEY?.trim());
-    const ready = tectlyConfigured && apiKeyConfigured;
+    const persistentIdempotency = analysisRegistry.mode === "file";
+    let idempotencyWritable = true;
+    let idempotencyMessage: string | null = null;
+    try {
+      await analysisRegistry.probe();
+    } catch (error) {
+      idempotencyWritable = false;
+      idempotencyMessage = errorMessage(error);
+    }
+    const persistenceRequirementSatisfied =
+      !REQUIRE_PERSISTENT_IDEMPOTENCY || persistentIdempotency;
+    const ready =
+      tectlyConfigured &&
+      apiKeyConfigured &&
+      idempotencyWritable &&
+      persistenceRequirementSatisfied;
 
     sendJson(
       response,
@@ -248,6 +280,11 @@ const server = createServer(async (request, response) => {
         tectlyConfigured,
         replicateConfigured,
         apiKeyConfigured,
+        idempotencyMode: analysisRegistry.mode,
+        idempotencyWritable,
+        persistentIdempotencyRequired: REQUIRE_PERSISTENT_IDEMPOTENCY,
+        persistentIdempotencyConfigured: persistentIdempotency,
+        idempotencyMessage,
         note: replicateConfigured
           ? null
           : "Replicate is optional in best-effort mode and required only for verifierMode=required.",
@@ -338,5 +375,7 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Bayti Core V2 listening on port ${PORT}`);
+  console.log(
+    `Bayti Core V2 listening on port ${PORT} (idempotency=${analysisRegistry.mode}, persistentRequired=${REQUIRE_PERSISTENT_IDEMPOTENCY})`,
+  );
 });
