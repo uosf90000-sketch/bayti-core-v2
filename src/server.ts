@@ -33,7 +33,6 @@ const REQUIRE_PERSISTENT_IDEMPOTENCY = /^(1|true|yes)$/i.test(
 const LAB_KEY = process.env.BAYTI_CORE_LAB_KEY?.trim() || null;
 
 function idempotencyStore(): IdempotencyStore<BaytiCoreAnalysisResult> | undefined {
-  // Shared Postgres is preferred because its atomic claim also protects multi-replica deployments.
   if (IDEMPOTENCY_DATABASE_URL) {
     return new PostgresIdempotencyStore<BaytiCoreAnalysisResult>(IDEMPOTENCY_DATABASE_URL);
   }
@@ -62,6 +61,12 @@ interface AnalyzeRequestBody {
   replicateImageMimeType?: string;
   wallTracingMode?: "Polygons" | "Rectangles" | "UniformPolygons";
   verifierMode?: VerifierMode;
+}
+
+interface SafeError {
+  status: number;
+  code: string;
+  message: string;
 }
 
 function sendJson(
@@ -241,7 +246,85 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function safeError(error: unknown): { status: number; code: string; message: string } {
+function safeProviderError(message: string): SafeError | null {
+  if (message.startsWith("Tectly authentication failed with HTTP ")) {
+    return {
+      status: 502,
+      code: "TECTLY_AUTHENTICATION_FAILED",
+      message,
+    };
+  }
+  if (message === "Tectly authentication returned no token.") {
+    return {
+      status: 502,
+      code: "TECTLY_AUTHENTICATION_INVALID_RESPONSE",
+      message,
+    };
+  }
+  if (message.startsWith("Tectly request failed: HTTP ")) {
+    return {
+      status: 502,
+      code: "TECTLY_REQUEST_FAILED",
+      message,
+    };
+  }
+  if (message.startsWith("Timed out waiting for Tectly ")) {
+    return {
+      status: 504,
+      code: "TECTLY_PROCESSING_TIMEOUT",
+      message,
+    };
+  }
+  if (message.startsWith("Invalid Tectly response:")) {
+    return {
+      status: 502,
+      code: "TECTLY_INVALID_RESPONSE",
+      message,
+    };
+  }
+  if (message.startsWith("Tectly is not configured.")) {
+    return {
+      status: 503,
+      code: "TECTLY_NOT_CONFIGURED",
+      message: "Tectly credentials are not configured on the server.",
+    };
+  }
+  if (message === "Tectly completed but returned no usable floor plan/floor geometry.") {
+    return {
+      status: 422,
+      code: "TECTLY_NO_USABLE_PLAN",
+      message: "Tectly completed the document but returned no usable floor-plan geometry.",
+    };
+  }
+  if (
+    message === "fetch failed" ||
+    message.toLowerCase().includes("operation was aborted") ||
+    message.toLowerCase().includes("network")
+  ) {
+    return {
+      status: 502,
+      code: "TECTLY_NETWORK_FAILED",
+      message: "Tectly network request failed before a usable response was received.",
+    };
+  }
+  if (message.startsWith("Replicate verifier is required but unavailable:")) {
+    return {
+      status: 503,
+      code: "REPLICATE_REQUIRED_UNAVAILABLE",
+      message,
+    };
+  }
+  if (message.startsWith("Replicate request failed")) {
+    return {
+      status: 502,
+      code: "REPLICATE_REQUEST_FAILED",
+      message,
+    };
+  }
+  return null;
+}
+
+function safeError(error: unknown): SafeError {
   const message = errorMessage(error);
   if (message === "REQUEST_BODY_TOO_LARGE") {
     return { status: 413, code: message, message: "Request body is too large." };
@@ -275,6 +358,10 @@ function safeError(error: unknown): { status: number; code: string; message: str
   ) {
     return { status: 400, code: message, message: "Invalid analysis request." };
   }
+
+  const provider = safeProviderError(message);
+  if (provider !== null) return provider;
+
   return {
     status: 502,
     code: "PROVIDER_ANALYSIS_FAILED",
