@@ -38,6 +38,16 @@ Floor plan
 
 The result exposes `verifierStatus`, `verifierMessage` and `replicateRequestId` so the caller can show exactly what happened rather than infer it from geometry.
 
+## HTTP safety
+
+- `POST /v1/analyze` requires both the Bearer API key and a stable `Idempotency-Key` header.
+- Repeating the same key and exact request within the process TTL replays the original promise/result instead of starting another provider analysis.
+- Reusing the same key for different content returns HTTP `409`.
+- Failed provider runs are also retained during the TTL because a failure may happen after Tectly already accepted a quota-bearing upload.
+- The idempotency registry is intentionally documented as **process-local**. A container restart clears it, so restart-safe deduplication still needs a persistent ledger before high-volume production.
+- `/ready` returns `503` when Tectly credentials or the Bayti API key are missing. Replicate remains optional for `best-effort` mode.
+- Provider failure details stay in server logs. HTTP callers receive a generic error plus `x-request-id` for correlation.
+
 ## Implemented
 
 - Tectly Basic-auth → JWT/Bearer client using the working `/api/v1` endpoint contract.
@@ -57,7 +67,7 @@ The result exposes `verifierStatus`, `verifierMessage` and `replicateRequestId` 
 - Required-verifier mode that avoids starting a Tectly paid analysis when verification already failed.
 - QA status (`pass`, `review`, `blocked`) and confidence evidence.
 - Unit/regression tests and GitHub Actions CI.
-- Minimal authenticated HTTP service for Railway: `/health`, `/ready`, and `POST /v1/analyze`.
+- Authenticated Railway HTTP service: `/health`, `/ready`, and `POST /v1/analyze`.
 
 ## Secure configuration
 
@@ -70,12 +80,13 @@ TECTLY_API_BASE_URL
 REPLICATE_API_TOKEN
 REPLICATE_FLOORPLAN_VERSION
 BAYTI_CORE_API_KEY
+BAYTI_CORE_IDEMPOTENCY_TTL_MS
 ```
 
 Tectly defaults to the sandbox host. Production must be selected explicitly with `TECTLY_API_BASE_URL=https://platform.tectly.com/api/v1`.
 
 ## Current verification
 
-TypeScript typecheck and the current core/fusion/mapping/parser regression tests pass in GitHub Actions.
+TypeScript typecheck and the current core/fusion/mapping/parser/idempotency regression tests pass in GitHub Actions.
 
 The remaining provider verification step is a **live same-plan run** with real Tectly and Replicate credentials configured securely. That run should be performed on the same reference floor plan already used to compare providers, then expanded into a 10–20 plan regression corpus before building the new Bayti UI/3D product around the core.
