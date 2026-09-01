@@ -4,6 +4,9 @@ import { ReplicateFloorplanClient } from "./providers/replicate-client.js";
 import { TectlyClient } from "./providers/tectly-client.js";
 import { mapTectlyBundleToCanonical } from "./providers/tectly-mapper.js";
 import type { ReplicateVerifierResult } from "./providers/types.js";
+import { buildBaytiRenderContract, type BaytiRenderContract } from "./render-contract.js";
+
+export const BAYTI_CORE_VERSION = "0.5.0" as const;
 
 export type VerifierMode = "best-effort" | "required";
 export type VerifierStatus = "succeeded" | "skipped" | "failed";
@@ -26,12 +29,16 @@ export interface AnalyzeBaytiCoreInput {
 }
 
 export interface BaytiCoreAnalysisResult {
+  engineVersion: typeof BAYTI_CORE_VERSION;
   tectlyProjectId: string;
   tectlyDocumentId: string;
   replicateRequestId: string | null;
   verifierStatus: VerifierStatus;
   verifierMessage: string | null;
+  /** Full diagnostic/source-aware canonical plans. */
   plans: CanonicalPlan[];
+  /** Stable product/3D handoff. Future UI should consume these rather than provider shapes. */
+  renderContracts: BaytiRenderContract[];
 }
 
 function errorMessage(error: unknown): string {
@@ -162,12 +169,16 @@ export async function analyzeBaytiCore(
     throw new Error("Tectly completed but returned no usable floor plan/floor geometry.");
   }
 
+  const renderContracts = plans.map((plan) => buildBaytiRenderContract(plan));
+
   return {
+    engineVersion: BAYTI_CORE_VERSION,
     tectlyProjectId: tectlyResult.projectId,
     tectlyDocumentId: tectlyResult.documentId,
     replicateRequestId: verifier?.meta.requestId ?? null,
     verifierStatus,
     verifierMessage,
     plans,
+    renderContracts,
   };
 }

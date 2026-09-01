@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { analyzeBaytiCore } from "../src/core.js";
+import { analyzeBaytiCore, BAYTI_CORE_VERSION } from "../src/core.js";
 import { ReplicateFloorplanClient } from "../src/providers/replicate-client.js";
 import { TectlyClient } from "../src/providers/tectly-client.js";
 import type { TectlyDocumentAnalysis, TectlyPlanBundle } from "../src/providers/tectly-types.js";
@@ -44,7 +44,7 @@ function input(verifierMode: "best-effort" | "required" = "best-effort") {
 }
 
 describe("Bayti Core verifier policy", () => {
-  it("preserves the Tectly result when best-effort verification fails", async () => {
+  it("preserves the Tectly result and returns a safe render contract when best-effort verification fails", async () => {
     const analyze = vi.fn(async () => tectlyAnalysis());
     const tectly = {
       authenticate: vi.fn(async () => undefined),
@@ -59,11 +59,16 @@ describe("Bayti Core verifier policy", () => {
     const result = await analyzeBaytiCore(input(), { tectly, replicate });
 
     expect(analyze).toHaveBeenCalledTimes(1);
+    expect(result.engineVersion).toBe(BAYTI_CORE_VERSION);
     expect(result.verifierStatus).toBe("failed");
     expect(result.replicateRequestId).toBeNull();
     expect(result.plans).toHaveLength(1);
     expect(result.plans[0]?.qa.status).toBe("review");
     expect(result.plans[0]?.qa.notes.some((note) => note.includes("verifier outage"))).toBe(true);
+    expect(result.renderContracts).toHaveLength(1);
+    expect(result.renderContracts[0]?.walls).toHaveLength(1);
+    expect(result.renderContracts[0]?.rooms).toHaveLength(1);
+    expect(result.renderContracts[0]?.quality.status).toBe("review");
   });
 
   it("does not start a paid Tectly analysis when required verification fails", async () => {

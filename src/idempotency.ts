@@ -1,40 +1,214 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 export interface IdempotentRunResult<T> {
   value: T;
   replayed: boolean;
 }
 
-interface RegistryEntry<T> {
-  fingerprint: string;
-  promise: Promise<T>;
-  expiresAtMs: number;
+export type PersistedIdempotencyEntry<T> =
+  | {
+      fingerprint: string;
+      state: "pending";
+      expiresAtMs: number;
+      createdAtMs: number;
+    }
+  | {
+      fingerprint: string;
+      state: "fulfilled";
+      expiresAtMs: number;
+      createdAtMs: number;
+      value: T;
+    }
+  | {
+      fingerprint: string;
+      state: "rejected";
+      expiresAtMs: number;
+      createdAtMs: number;
+      errorMessage: string;
+    };
+
+export interface IdempotencyStore<T> {
+  readonly mode: "memory" | "file";
+  get(key: string): Promise<PersistedIdempotencyEntry<T> | null>;
+  set(key: string, entry: PersistedIdempotencyEntry<T>): Promise<void>;
+  delete(key: string): Promise<void>;
+  probe?(): Promise<void>;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export class MemoryIdempotencyStore<T> implements IdempotencyStore<T> {
+  readonly mode = "memory" as const;
+  private readonly entries = new Map<string, PersistedIdempotencyEntry<T>>();
+
+  async get(key: string): Promise<PersistedIdempotencyEntry<T> | null> {
+    return this.entries.get(key) ?? null;
+  }
+
+  async set(key: string, entry: PersistedIdempotencyEntry<T>): Promise<void> {
+    this.entries.set(key, entry);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.entries.delete(key);
+  }
 }
 
 /**
- * Process-local guard against accidental duplicate paid analyses.
+ * Restart-safe single-replica store. Point `directory` at a mounted persistent volume.
+ * File names are hashes, so caller-provided idempotency keys never become paths.
  *
- * Completed successes AND failures are retained for the TTL. That is deliberate: if
- * Tectly accepted a quota-bearing upload and a later step failed, blindly retrying the
- * same request could charge twice. An operator can intentionally retry with a new key.
+ * The atomic temp-file + rename write protects against partial JSON records. This store
+ * intentionally targets one application replica. Multi-replica deployments should use
+ * a transactional shared ledger (database/Redis) behind the same IdempotencyStore contract.
+ */
+export class FileIdempotencyStore<T> implements IdempotencyStore<T> {
+  readonly mode = "file" as const;
+
+  constructor(private readonly directory: string) {
+    if (directory.trim().length === 0) {
+      throw new Error("Persistent idempotency directory must not be empty.");
+    }
+  }
+
+  private pathFor(key: string): string {
+    const name = createHash("sha256").update(key).digest("hex");
+    return join(this.directory, `${name}.json`);
+  }
+
+  async probe(): Promise<void> {
+    await mkdir(this.directory, { recursive: true });
+    const path = join(this.directory, `.probe-${randomUUID()}`);
+    await writeFile(path, "ok", { encoding: "utf8", flag: "wx" });
+    await unlink(path);
+  }
+
+  async get(key: string): Promise<PersistedIdempotencyEntry<T> | null> {
+    await mkdir(this.directory, { recursive: true });
+    try {
+      const raw = await readFile(this.pathFor(key), "utf8");
+      return JSON.parse(raw) as PersistedIdempotencyEntry<T>;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  async set(key: string, entry: PersistedIdempotencyEntry<T>): Promise<void> {
+    await mkdir(this.directory, { recursive: true });
+    const target = this.pathFor(key);
+    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify(entry), { encoding: "utf8", flag: "wx" });
+    await rename(temporary, target);
+  }
+
+  async delete(key: string): Promise<void> {
+    try {
+      await unlink(this.pathFor(key));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+interface InFlightEntry<T> {
+  fingerprint: string;
+  promise: Promise<IdempotentRunResult<T>>;
+}
+
+/**
+ * Guard against accidental duplicate paid analyses.
  *
- * This registry is not persistent across container restarts; callers still need stable
- * idempotency keys and a future persistent ledger for restart-safe deduplication.
+ * The in-process reservation is installed synchronously before any persistent-store
+ * await, so two simultaneous HTTP requests with the same key cannot both cross the
+ * start boundary. A durable `pending` record is then written before the provider
+ * operation starts. If the process crashes after a quota-bearing upload, a restart sees
+ * the pending record and refuses to run the same key again instead of risking a second
+ * charge. Successful and failed outcomes are retained for the TTL. An intentional retry
+ * must use a new key.
  */
 export class IdempotencyRegistry<T> {
-  private readonly entries = new Map<string, RegistryEntry<T>>();
+  private readonly inFlight = new Map<string, InFlightEntry<T>>();
 
   constructor(
     private readonly ttlMs = 30 * 60_000,
     private readonly now: () => number = () => Date.now(),
+    private readonly store: IdempotencyStore<T> = new MemoryIdempotencyStore<T>(),
   ) {
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
       throw new Error("Idempotency TTL must be positive.");
     }
   }
 
-  private prune(): void {
-    const now = this.now();
-    for (const [key, entry] of this.entries) {
-      if (entry.expiresAtMs <= now) this.entries.delete(key);
+  get mode(): IdempotencyStore<T>["mode"] {
+    return this.store.mode;
+  }
+
+  async probe(): Promise<void> {
+    await this.store.probe?.();
+  }
+
+  private async existing(key: string): Promise<PersistedIdempotencyEntry<T> | null> {
+    const entry = await this.store.get(key);
+    if (entry === null) return null;
+    if (entry.expiresAtMs <= this.now()) {
+      await this.store.delete(key);
+      return null;
+    }
+    return entry;
+  }
+
+  private async execute(
+    key: string,
+    fingerprint: string,
+    operation: () => Promise<T>,
+  ): Promise<IdempotentRunResult<T>> {
+    const persisted = await this.existing(key);
+    if (persisted !== null) {
+      if (persisted.fingerprint !== fingerprint) {
+        throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST");
+      }
+      if (persisted.state === "fulfilled") {
+        return { value: persisted.value, replayed: true };
+      }
+      if (persisted.state === "rejected") {
+        throw new Error(persisted.errorMessage);
+      }
+      throw new Error("IDEMPOTENCY_REQUEST_IN_PROGRESS_OR_INTERRUPTED");
+    }
+
+    const createdAtMs = this.now();
+    const expiresAtMs = createdAtMs + this.ttlMs;
+    await this.store.set(key, {
+      fingerprint,
+      state: "pending",
+      createdAtMs,
+      expiresAtMs,
+    });
+
+    try {
+      const value = await operation();
+      await this.store.set(key, {
+        fingerprint,
+        state: "fulfilled",
+        createdAtMs,
+        expiresAtMs,
+        value,
+      });
+      return { value, replayed: false };
+    } catch (error) {
+      await this.store.set(key, {
+        fingerprint,
+        state: "rejected",
+        createdAtMs,
+        expiresAtMs,
+        errorMessage: errorMessage(error),
+      });
+      throw error;
     }
   }
 
@@ -43,22 +217,24 @@ export class IdempotencyRegistry<T> {
     fingerprint: string,
     operation: () => Promise<T>,
   ): Promise<IdempotentRunResult<T>> {
-    this.prune();
-    const existing = this.entries.get(key);
-    if (existing !== undefined) {
-      if (existing.fingerprint !== fingerprint) {
+    const active = this.inFlight.get(key);
+    if (active !== undefined) {
+      if (active.fingerprint !== fingerprint) {
         throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST");
       }
-      return { value: await existing.promise, replayed: true };
+      const result = await active.promise;
+      return { value: result.value, replayed: true };
     }
 
-    const promise = operation();
-    this.entries.set(key, {
-      fingerprint,
-      promise,
-      expiresAtMs: this.now() + this.ttlMs,
-    });
+    // Reserve synchronously, before execute() can yield on store access.
+    const promise = this.execute(key, fingerprint, operation);
+    this.inFlight.set(key, { fingerprint, promise });
 
-    return { value: await promise, replayed: false };
+    try {
+      return await promise;
+    } finally {
+      const current = this.inFlight.get(key);
+      if (current?.promise === promise) this.inFlight.delete(key);
+    }
   }
 }
