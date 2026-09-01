@@ -64,4 +64,44 @@ describe("Tectly + Replicate fusion", () => {
     expect(fused.reviewCandidates.some((candidate) => candidate.kind === "window")).toBe(true);
     expect(fused.qa.status).toBe("review");
   });
+
+  it("ignores verifier detections belonging to another plan on the same page", () => {
+    const bundle: TectlyPlanBundle = {
+      plan: {
+        id: "small-plan",
+        floorId: "floor",
+        pageSection: { left: 0.05, top: 0.05, width: 0.4, height: 0.4 },
+        wallOpeningProcessingStatus: "Positive",
+        roomProcessingStatus: "Positive",
+        wallProcessingStatus: "Positive",
+        horizontalScaleProcessingStatus: "Positive",
+        postProcessingStatus: "Positive",
+      },
+      floor: { id: "floor", horizontalScale: 0.1, verticalScale: 0.1 },
+      walls: [{ id: "wall-a", boundary: [[0.1, 0.1], [0.9, 0.1], [0.9, 0.18], [0.1, 0.18]] }],
+      rooms: [{ id: "room-a", area: 10, boundary: [[0.1, 0.18], [0.9, 0.18], [0.9, 0.9], [0.1, 0.9]] }],
+      wallOpenings: [],
+    };
+    const primary = mapTectlyBundleToCanonical(bundle, {
+      widthPx: 1000,
+      heightPx: 1000,
+      mimeType: "image/jpeg",
+    });
+
+    const fused = fuseTectlyWithReplicate(
+      primary,
+      verifier({
+        wallContours: [
+          // Evidence for the current plan.
+          [{ x: 0.085, y: 0.085 }, { x: 0.415, y: 0.085 }, { x: 0.415, y: 0.13 }, { x: 0.085, y: 0.13 }],
+          // Separate plan on the right side of the same raster page.
+          [{ x: 0.7, y: 0.2 }, { x: 0.95, y: 0.2 }, { x: 0.95, y: 0.3 }, { x: 0.7, y: 0.3 }],
+        ],
+        doorCenterLines: [],
+      }),
+    );
+
+    expect(fused.reviewCandidates.some((candidate) => candidate.id === "review-replicate-wall-2")).toBe(false);
+    expect(fused.qa.notes.some((note) => note.includes("outside this plan's geometry bounds"))).toBe(true);
+  });
 });
