@@ -1,5 +1,11 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { IdempotencyRegistry } from "../src/idempotency.js";
+import {
+  FileIdempotencyStore,
+  IdempotencyRegistry,
+} from "../src/idempotency.js";
 
 describe("IdempotencyRegistry", () => {
   it("replays the same logical request without invoking the paid operation twice", async () => {
@@ -50,5 +56,54 @@ describe("IdempotencyRegistry", () => {
     expect(first.replayed).toBe(false);
     expect(second.replayed).toBe(false);
     expect(operation).toHaveBeenCalledTimes(2);
+  });
+
+  it("replays a completed paid analysis after a process restart when file persistence is configured", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bayti-idempotency-"));
+    try {
+      const operation = vi.fn(async () => ({ plans: 1 }));
+      const firstRegistry = new IdempotencyRegistry(
+        60_000,
+        () => 1_000,
+        new FileIdempotencyStore<{ plans: number }>(directory),
+      );
+      const first = await firstRegistry.run("analysis-123", "fingerprint-a", operation);
+
+      const afterRestart = new IdempotencyRegistry(
+        60_000,
+        () => 1_500,
+        new FileIdempotencyStore<{ plans: number }>(directory),
+      );
+      const replay = await afterRestart.run("analysis-123", "fingerprint-a", operation);
+
+      expect(first).toEqual({ value: { plans: 1 }, replayed: false });
+      expect(replay).toEqual({ value: { plans: 1 }, replayed: true });
+      expect(operation).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to repeat an interrupted pending paid analysis after restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "bayti-idempotency-"));
+    try {
+      const store = new FileIdempotencyStore<string>(directory);
+      await store.set("analysis-123", {
+        fingerprint: "fingerprint-a",
+        state: "pending",
+        createdAtMs: 1_000,
+        expiresAtMs: 61_000,
+      });
+
+      const afterRestart = new IdempotencyRegistry(60_000, () => 1_500, store);
+      const operation = vi.fn(async () => "must-not-run");
+
+      await expect(
+        afterRestart.run("analysis-123", "fingerprint-a", operation),
+      ).rejects.toThrow("IDEMPOTENCY_REQUEST_IN_PROGRESS_OR_INTERRUPTED");
+      expect(operation).not.toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
