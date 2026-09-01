@@ -11,6 +11,7 @@ export interface RegressionExpectation {
   openings: CountRange;
   rooms: CountRange;
   requireKnownScale?: boolean;
+  /** Legacy field name: now measures unambiguous wall-region support, including bridges. */
   minHostedOpeningRate?: number;
   minConfirmedOpeningRate?: number;
   maxReviewCandidates?: number;
@@ -63,8 +64,8 @@ export function evaluateRegressionPlan(
   }
 
   checkRatio(
-    "hosted opening rate",
-    quality.metrics.hostedOpeningRate,
+    "supported opening rate",
+    quality.metrics.supportedOpeningRate,
     expected.minHostedOpeningRate,
     failures,
   );
