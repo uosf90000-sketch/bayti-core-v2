@@ -61,11 +61,16 @@ export interface CanonicalOpening {
     end: NormalizedPoint2D;
   };
   /**
-   * Tectly does not expose a wall host directly. Bayti may fill this only when the
-   * opening line is geometrically supported by one wall footprint unambiguously;
-   * junction/tie cases stay null rather than being guessed.
+   * A single logical wall-region host, when one footprint unambiguously supports the
+   * opening line. Null is valid for an opening that bridges two wall-region fragments.
    */
   hostWallId: string | null;
+  /**
+   * Authoritative wall-region footprint ids supporting the opening. Tectly polygon mode
+   * can split one logical wall at an opening void, so a correct opening may have two ids.
+   * Optional for backward-compatible stored fixtures; new Core results populate it.
+   */
+  supportingWallIds?: string[];
   /** Physical line width derived only when both canonical physical axes are known. */
   widthMeters: number | null;
   /** Canonical room ids explicitly associated with the opening by the primary provider. */

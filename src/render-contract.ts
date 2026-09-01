@@ -24,7 +24,10 @@ export interface RenderWall {
 export interface RenderOpening {
   id: string;
   kind: OpeningKind;
-  hostWallId: string;
+  /** Present for a genuine single-footprint host; null for a two-fragment bridge. */
+  hostWallId: string | null;
+  /** One or two wall-region solids that the opening cut belongs to. */
+  supportingWallIds: string[];
   centerLine: CanonicalOpening["centerLine"];
   widthMeters: number;
   connectedRoomIds: string[];
@@ -35,10 +38,11 @@ export interface RenderOpening {
 export interface UnresolvedRenderOpening {
   id: string;
   kind: OpeningKind;
+  supportingWallIds: string[];
   centerLine: CanonicalOpening["centerLine"];
   connectedRoomIds: string[];
   connectsToExterior: boolean | null;
-  reasons: Array<"missing-host-wall" | "missing-physical-width">;
+  reasons: Array<"missing-wall-support" | "missing-physical-width">;
 }
 
 export interface RenderRoomSurface {
@@ -50,7 +54,7 @@ export interface RenderRoomSurface {
 }
 
 export interface BaytiRenderContract {
-  schemaVersion: "1.1";
+  schemaVersion: "1.2";
   coordinateSystem: "full-page-normalized-0..1";
   /**
    * Horizontal geometry only. The renderer/design layer must provide ceiling height,
@@ -67,13 +71,19 @@ export interface BaytiRenderContract {
   notes: string[];
 }
 
+function wallSupportIds(opening: CanonicalOpening): string[] {
+  if (Array.isArray(opening.supportingWallIds) && opening.supportingWallIds.length > 0) {
+    return opening.supportingWallIds;
+  }
+  return opening.hostWallId === null ? [] : [opening.hostWallId];
+}
+
 /**
  * Stable hand-off from geometry analysis to the future UI/3D renderer.
  *
  * Complex/L-shaped/curved Tectly wall footprints remain directly renderable as polygon
- * solids even when no straight centerline can be safely derived. This is the contract
- * that prevents a renderer from recreating the old "collapse everything to one thick
- * straight wall" failure.
+ * solids even when no straight centerline can be safely derived. Openings may be
+ * supported by one wall solid or bridge the two solids that border an opening void.
  */
 export function buildBaytiRenderContract(
   plan: CanonicalPlan,
@@ -85,16 +95,17 @@ export function buildBaytiRenderContract(
   const unresolvedOpenings: UnresolvedRenderOpening[] = [];
 
   for (const opening of plan.openings) {
-    const hostWallId = opening.hostWallId;
+    const supportingWallIds = wallSupportIds(opening);
     const widthMeters = opening.widthMeters;
     const reasons: UnresolvedRenderOpening["reasons"] = [];
-    if (hostWallId === null) reasons.push("missing-host-wall");
+    if (supportingWallIds.length === 0) reasons.push("missing-wall-support");
     if (widthMeters === null) reasons.push("missing-physical-width");
 
-    if (reasons.length > 0 || hostWallId === null || widthMeters === null) {
+    if (reasons.length > 0 || widthMeters === null) {
       unresolvedOpenings.push({
         id: opening.id,
         kind: opening.kind,
+        supportingWallIds,
         centerLine: opening.centerLine,
         connectedRoomIds: opening.connectedRoomIds,
         connectsToExterior: opening.connectsToExterior,
@@ -106,7 +117,8 @@ export function buildBaytiRenderContract(
     openings.push({
       id: opening.id,
       kind: opening.kind,
-      hostWallId,
+      hostWallId: opening.hostWallId,
+      supportingWallIds,
       centerLine: opening.centerLine,
       widthMeters,
       connectedRoomIds: opening.connectedRoomIds,
@@ -117,17 +129,18 @@ export function buildBaytiRenderContract(
 
   const notes = [
     "Wall footprints are authoritative horizontal solids; polygon-only walls must be preserved during extrusion.",
+    "An opening can reference one wall-region solid or bridge two fragments separated by the opening void.",
     "Opening-to-room connectivity is provider-backed only; missing topology stays unknown rather than being inferred by the renderer.",
     "Vertical dimensions are intentionally not inferred by Bayti Core V2.",
   ];
   if (unresolvedOpenings.length > 0) {
     notes.push(
-      `${unresolvedOpenings.length} opening(s) are excluded from automatic wall cuts until host/width geometry is resolved.`,
+      `${unresolvedOpenings.length} opening(s) are excluded from automatic wall cuts until wall support/width geometry is resolved.`,
     );
   }
 
   return {
-    schemaVersion: "1.1",
+    schemaVersion: "1.2",
     coordinateSystem: "full-page-normalized-0..1",
     verticalDimensions: "consumer-supplied",
     scale: plan.scale,

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { inferOpeningHostWallId, openingWidthMeters } from "../src/providers/opening-host.js";
+import {
+  inferOpeningHostWallId,
+  inferOpeningWallSupport,
+  openingWidthMeters,
+} from "../src/providers/opening-host.js";
 import type { CanonicalWall, PlanScale, SourceImageInfo } from "../src/domain/canonical.js";
 
 const source: SourceImageInfo = { widthPx: 1000, heightPx: 1000, mimeType: "image/png" };
@@ -19,7 +23,7 @@ function wall(id: string, minX: number, minY: number, maxX: number, maxY: number
   };
 }
 
-describe("inferOpeningHostWallId", () => {
+describe("opening wall support", () => {
   it("assigns a clearly supported opening to one wall footprint", () => {
     const host = inferOpeningHostWallId(
       { start: { x: 0.2, y: 0.11 }, end: { x: 0.4, y: 0.11 } },
@@ -29,13 +33,28 @@ describe("inferOpeningHostWallId", () => {
     expect(host).toBe("top");
   });
 
+  it("preserves both wall fragments when an opening bridges a polygon void", () => {
+    const support = inferOpeningWallSupport(
+      { start: { x: 0.4, y: 0.11 }, end: { x: 0.5, y: 0.11 } },
+      [
+        wall("left-fragment", 0.1, 0.1, 0.4, 0.13),
+        wall("right-fragment", 0.5, 0.1, 0.9, 0.13),
+      ],
+      source,
+    );
+
+    expect(support.hostWallId).toBeNull();
+    expect(support.supportingWallIds).toEqual(["left-fragment", "right-fragment"]);
+  });
+
   it("leaves an ambiguous junction unhosted instead of guessing", () => {
-    const host = inferOpeningHostWallId(
+    const support = inferOpeningWallSupport(
       { start: { x: 0.49, y: 0.49 }, end: { x: 0.51, y: 0.51 } },
       [wall("horizontal", 0.2, 0.49, 0.8, 0.51), wall("vertical", 0.49, 0.2, 0.51, 0.8)],
       source,
     );
-    expect(host).toBeNull();
+    expect(support.hostWallId).toBeNull();
+    expect(support.supportingWallIds).toEqual([]);
   });
 });
 

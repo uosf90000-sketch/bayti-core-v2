@@ -1,9 +1,10 @@
-import type { CanonicalPlan } from "./domain/canonical.js";
+import type { CanonicalOpening, CanonicalPlan } from "./domain/canonical.js";
 import { validateCanonicalPlan, type CanonicalValidationReport } from "./validation.js";
 
 export interface GeometryQualityPolicy {
   minWallConfirmationRate: number;
   minOpeningConfirmationRate: number;
+  /** Legacy field name: applied to unambiguous opening wall-support coverage. */
   minHostedOpeningRate: number;
   requireKnownScale: boolean;
   requireRooms: boolean;
@@ -30,10 +31,14 @@ export interface GeometryQualityMetrics {
   confirmedWallCount: number;
   confirmedOpeningCount: number;
   hostedOpeningCount: number;
+  supportedOpeningCount: number;
   measuredOpeningCount: number;
   wallConfirmationRate: number;
   openingConfirmationRate: number;
   hostedOpeningRate: number;
+  supportedOpeningRate: number;
+  /** UI/backward-compatible alias for supportedOpeningRate. */
+  openingHostCoverage: number;
   measuredOpeningRate: number;
   complexWallCount: number;
   conflictCount: number;
@@ -60,6 +65,13 @@ function validRatio(value: number, name: string): void {
   }
 }
 
+function wallSupportIds(opening: CanonicalOpening): string[] {
+  if (Array.isArray(opening.supportingWallIds) && opening.supportingWallIds.length > 0) {
+    return opening.supportingWallIds;
+  }
+  return opening.hostWallId === null ? [] : [opening.hostWallId];
+}
+
 export function assessGeometryQuality(
   plan: CanonicalPlan,
   policy: GeometryQualityPolicy = DEFAULT_GEOMETRY_QUALITY_POLICY,
@@ -76,6 +88,7 @@ export function assessGeometryQuality(
     (opening) => opening.confidence.agreement === "confirmed",
   ).length;
   const hostedOpeningCount = plan.openings.filter((opening) => opening.hostWallId !== null).length;
+  const supportedOpeningCount = plan.openings.filter((opening) => wallSupportIds(opening).length > 0).length;
   const measuredOpeningCount = plan.openings.filter((opening) => opening.widthMeters !== null).length;
   const complexWallCount = plan.walls.filter((wall) => wall.geometry === null).length;
   const hasKnownScale =
@@ -84,6 +97,7 @@ export function assessGeometryQuality(
     plan.scale.metersPerNormalizedX > 0 &&
     plan.scale.metersPerNormalizedY !== null &&
     plan.scale.metersPerNormalizedY > 0;
+  const supportedOpeningRate = rate(supportedOpeningCount, plan.openings.length, 1);
 
   const metrics: GeometryQualityMetrics = {
     wallCount: plan.walls.length,
@@ -92,10 +106,13 @@ export function assessGeometryQuality(
     confirmedWallCount,
     confirmedOpeningCount,
     hostedOpeningCount,
+    supportedOpeningCount,
     measuredOpeningCount,
     wallConfirmationRate: rate(confirmedWallCount, plan.walls.length, 0),
     openingConfirmationRate: rate(confirmedOpeningCount, plan.openings.length, 1),
     hostedOpeningRate: rate(hostedOpeningCount, plan.openings.length, 1),
+    supportedOpeningRate,
+    openingHostCoverage: supportedOpeningRate,
     measuredOpeningRate: rate(measuredOpeningCount, plan.openings.length, 1),
     complexWallCount,
     conflictCount: plan.qa.conflicts.length,
@@ -126,9 +143,9 @@ export function assessGeometryQuality(
       `Independent opening confirmation is ${(metrics.openingConfirmationRate * 100).toFixed(1)}%, below ${(policy.minOpeningConfirmationRate * 100).toFixed(0)}%.`,
     );
   }
-  if (metrics.hostedOpeningRate < policy.minHostedOpeningRate) {
+  if (metrics.supportedOpeningRate < policy.minHostedOpeningRate) {
     reviewReasons.push(
-      `Only ${(metrics.hostedOpeningRate * 100).toFixed(1)}% of openings have an unambiguous host wall.`,
+      `Only ${(metrics.supportedOpeningRate * 100).toFixed(1)}% of openings have unambiguous wall-region support.`,
     );
   }
   if (!policy.allowConflictsForPass && metrics.conflictCount > 0) {

@@ -122,6 +122,32 @@ export function validateCanonicalPlan(plan: CanonicalPlan): CanonicalValidationR
     if (opening.hostWallId !== null && !wallIds.has(opening.hostWallId)) {
       errors.push(`${opening.id} references missing host wall ${opening.hostWallId}.`);
     }
+
+    if (opening.supportingWallIds !== undefined) {
+      if (!Array.isArray(opening.supportingWallIds)) {
+        errors.push(`${opening.id} has invalid supporting wall ids.`);
+      } else {
+        if (opening.supportingWallIds.length > 2) {
+          errors.push(`${opening.id} references more than two supporting wall regions.`);
+        }
+        for (const duplicate of duplicateIds(opening.supportingWallIds)) {
+          errors.push(`${opening.id} contains duplicate supporting wall ${duplicate}.`);
+        }
+        for (const wallId of opening.supportingWallIds) {
+          if (!wallIds.has(wallId)) {
+            errors.push(`${opening.id} references missing supporting wall ${wallId}.`);
+          }
+        }
+        if (
+          opening.hostWallId !== null &&
+          opening.supportingWallIds.length > 0 &&
+          !opening.supportingWallIds.includes(opening.hostWallId)
+        ) {
+          errors.push(`${opening.id} host wall is not included in its supporting wall ids.`);
+        }
+      }
+    }
+
     if (opening.widthMeters !== null && (!Number.isFinite(opening.widthMeters) || opening.widthMeters <= 0)) {
       errors.push(`${opening.id} has a non-positive/invalid physical width.`);
     }

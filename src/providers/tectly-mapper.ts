@@ -13,7 +13,7 @@ import type {
   TectlyPlanBundle,
   TectlyPoint,
 } from "./tectly-types.js";
-import { inferOpeningHostWallId, openingWidthMeters } from "./opening-host.js";
+import { inferOpeningWallSupport, openingWidthMeters } from "./opening-host.js";
 import { tectlyOpeningKind } from "./tectly-types.js";
 import { fitStraightWallFootprint } from "./wall-fit.js";
 
@@ -130,6 +130,8 @@ export function mapTectlyBundleToCanonical(
   });
 
   let hostedOpeningCount = 0;
+  let supportedOpeningCount = 0;
+  let bridgedOpeningCount = 0;
   let measuredOpeningCount = 0;
   let topologizedOpeningCount = 0;
   let unknownTopologyReferenceCount = 0;
@@ -141,7 +143,7 @@ export function mapTectlyBundleToCanonical(
       start: mapTectlyPointToPage(a, section),
       end: mapTectlyPointToPage(b, section),
     };
-    const hostWallId = inferOpeningHostWallId(centerLine, walls, sourceImage);
+    const wallSupport = inferOpeningWallSupport(centerLine, walls, sourceImage);
     const widthMeters = openingWidthMeters(centerLine, scale);
     const connectedRoomIds: string[] = [];
     const providerRoomIds = Array.isArray(opening.rooms)
@@ -159,15 +161,20 @@ export function mapTectlyBundleToCanonical(
     if (unknownRoomRefs > 0) unknownTopologyReferenceCount += unknownRoomRefs;
     if (connectedRoomIds.length > 0) topologizedOpeningCount += 1;
 
-    if (hostWallId !== null) hostedOpeningCount += 1;
+    if (wallSupport.hostWallId !== null) hostedOpeningCount += 1;
+    if (wallSupport.supportingWallIds.length > 0) supportedOpeningCount += 1;
+    if (wallSupport.supportingWallIds.length === 2) bridgedOpeningCount += 1;
     if (widthMeters !== null) measuredOpeningCount += 1;
 
     return {
       id: `opening-${index + 1}`,
       kind,
       centerLine,
-      // This is geometric inference, not a provider claim. Ambiguous junctions remain null.
-      hostWallId,
+      // A single host is retained only when one footprint clearly supports the opening.
+      // Polygon tracing can split a logical wall at the opening void, in which case the
+      // two endpoint-supporting fragments are preserved instead of choosing one falsely.
+      hostWallId: wallSupport.hostWallId,
+      supportingWallIds: wallSupport.supportingWallIds,
       widthMeters,
       connectedRoomIds,
       // Tectly's room-id list is preserved when present, but Core does not equate "one room" with exterior.
@@ -213,7 +220,7 @@ export function mapTectlyBundleToCanonical(
   }
   if (openings.length > 0) {
     qaNotes.push(
-      `Opening geometry: ${hostedOpeningCount}/${openings.length} openings received an unambiguous host wall; ${measuredOpeningCount}/${openings.length} received a physical width.`,
+      `Opening wall support: ${supportedOpeningCount}/${openings.length} openings received unambiguous wall-region support (${hostedOpeningCount} single-footprint, ${bridgedOpeningCount} bridged across two fragments); ${measuredOpeningCount}/${openings.length} received a physical width.`,
     );
     qaNotes.push(
       `Opening topology: ${topologizedOpeningCount}/${openings.length} openings include provider-backed room connectivity; exterior connectivity remains unknown unless explicit evidence exists.`,
