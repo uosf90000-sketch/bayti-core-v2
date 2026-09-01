@@ -1,5 +1,7 @@
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { analyzeBaytiCore, type VerifierMode } from "./core.js";
+import { analyzeBaytiCore, type BaytiCoreAnalysisResult, type VerifierMode } from "./core.js";
+import { IdempotencyRegistry } from "./idempotency.js";
 
 const DEFAULT_MAX_BODY_BYTES = 35 * 1024 * 1024;
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
@@ -7,6 +9,12 @@ const MAX_BODY_BYTES = Number.parseInt(
   process.env.BAYTI_CORE_MAX_BODY_BYTES ?? String(DEFAULT_MAX_BODY_BYTES),
   10,
 );
+const IDEMPOTENCY_TTL_MS = Number.parseInt(
+  process.env.BAYTI_CORE_IDEMPOTENCY_TTL_MS ?? String(30 * 60_000),
+  10,
+);
+
+const analysisRegistry = new IdempotencyRegistry<BaytiCoreAnalysisResult>(IDEMPOTENCY_TTL_MS);
 
 interface AnalyzeRequestBody {
   fileName: string;
@@ -23,14 +31,31 @@ interface AnalyzeRequestBody {
   verifierMode?: VerifierMode;
 }
 
-function sendJson(response: ServerResponse, statusCode: number, body: unknown): void {
+function sendJson(
+  response: ServerResponse,
+  statusCode: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): void {
   const payload = JSON.stringify(body);
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(payload),
     "cache-control": "no-store",
+    ...headers,
   });
   response.end(payload);
+}
+
+function firstHeader(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return value[0]?.trim() || null;
+  return value?.trim() || null;
+}
+
+function requestId(request: IncomingMessage): string {
+  const supplied = firstHeader(request.headers["x-request-id"]);
+  if (supplied && supplied.length <= 128) return supplied;
+  return randomUUID();
 }
 
 function bearerToken(request: IncomingMessage): string | null {
@@ -40,10 +65,23 @@ function bearerToken(request: IncomingMessage): string | null {
   return token.length > 0 ? token : null;
 }
 
+function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, "utf8");
+  const right = Buffer.from(b, "utf8");
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
 function authorized(request: IncomingMessage): boolean {
   const expected = process.env.BAYTI_CORE_API_KEY?.trim();
-  if (!expected) return false;
-  return bearerToken(request) === expected;
+  const supplied = bearerToken(request);
+  if (!expected || !supplied) return false;
+  return safeEqual(supplied, expected);
+}
+
+function readIdempotencyKey(request: IncomingMessage): string | null {
+  const key = firstHeader(request.headers["idempotency-key"]);
+  if (!key || key.length < 8 || key.length > 200) return null;
+  return key;
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -139,10 +177,25 @@ function decodeBlob(base64: string, mimeType: string): Blob {
   return new Blob([new Uint8Array(buffer)], { type: mimeType });
 }
 
+function requestFingerprint(body: AnalyzeRequestBody): string {
+  return createHash("sha256").update(JSON.stringify(body)).digest("hex");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function safeError(error: unknown): { status: number; code: string; message: string } {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   if (message === "REQUEST_BODY_TOO_LARGE") {
     return { status: 413, code: message, message: "Request body is too large." };
+  }
+  if (message === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST") {
+    return {
+      status: 409,
+      code: message,
+      message: "Idempotency key was already used for a different analysis request.",
+    };
   }
   if (
     message.startsWith("INVALID_") ||
@@ -154,77 +207,134 @@ function safeError(error: unknown): { status: number; code: string; message: str
   return {
     status: 502,
     code: "PROVIDER_ANALYSIS_FAILED",
-    message,
+    // Provider internals stay in server logs; callers get a correlation id instead.
+    message: "Floor-plan provider analysis failed.",
   };
 }
 
 const server = createServer(async (request, response) => {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  const correlationId = requestId(request);
+  const commonHeaders = { "x-request-id": correlationId };
 
   if (method === "GET" && url.pathname === "/health") {
-    sendJson(response, 200, {
-      status: "ok",
-      service: "bayti-core-v2",
-      version: "0.3.0",
-    });
+    sendJson(
+      response,
+      200,
+      {
+        status: "ok",
+        service: "bayti-core-v2",
+        version: "0.4.0",
+      },
+      commonHeaders,
+    );
     return;
   }
 
   if (method === "GET" && url.pathname === "/ready") {
-    sendJson(response, 200, {
-      status: "ok",
-      tectlyConfigured: Boolean(
-        process.env.TECTLY_CLIENT_ID?.trim() && process.env.TECTLY_CLIENT_SECRET?.trim(),
-      ),
-      replicateConfigured: Boolean(process.env.REPLICATE_API_TOKEN?.trim()),
-      apiKeyConfigured: Boolean(process.env.BAYTI_CORE_API_KEY?.trim()),
-    });
+    const tectlyConfigured = Boolean(
+      process.env.TECTLY_CLIENT_ID?.trim() && process.env.TECTLY_CLIENT_SECRET?.trim(),
+    );
+    const replicateConfigured = Boolean(process.env.REPLICATE_API_TOKEN?.trim());
+    const apiKeyConfigured = Boolean(process.env.BAYTI_CORE_API_KEY?.trim());
+    const ready = tectlyConfigured && apiKeyConfigured;
+
+    sendJson(
+      response,
+      ready ? 200 : 503,
+      {
+        status: ready ? "ready" : "not-ready",
+        tectlyConfigured,
+        replicateConfigured,
+        apiKeyConfigured,
+        note: replicateConfigured
+          ? null
+          : "Replicate is optional in best-effort mode and required only for verifierMode=required.",
+      },
+      commonHeaders,
+    );
     return;
   }
 
   if (method === "POST" && url.pathname === "/v1/analyze") {
     if (!authorized(request)) {
-      sendJson(response, 401, { error: "UNAUTHORIZED" });
+      sendJson(response, 401, { error: "UNAUTHORIZED", requestId: correlationId }, commonHeaders);
+      return;
+    }
+
+    const idempotencyKey = readIdempotencyKey(request);
+    if (idempotencyKey === null) {
+      sendJson(
+        response,
+        400,
+        {
+          error: "IDEMPOTENCY_KEY_REQUIRED",
+          message: "Send a stable Idempotency-Key header (8–200 characters) for each logical analysis.",
+          requestId: correlationId,
+        },
+        commonHeaders,
+      );
       return;
     }
 
     try {
       const body = parseAnalyzeBody(await readJsonBody(request));
-      const tectlyFile = decodeBlob(body.fileBase64, body.fileMimeType);
-      const replicateImage = body.replicateImageBase64
-        ? decodeBlob(
-            body.replicateImageBase64,
-            body.replicateImageMimeType ?? body.sourceImage.mimeType,
-          )
-        : tectlyFile;
 
       if (body.fileMimeType.toLowerCase().includes("pdf") && !body.replicateImageBase64) {
-        sendJson(response, 400, {
-          error: "PDF_REQUIRES_REPLICATE_RASTER",
-          message: "Provide replicateImageBase64 for the same rendered PDF page.",
-        });
+        sendJson(
+          response,
+          400,
+          {
+            error: "PDF_REQUIRES_REPLICATE_RASTER",
+            message: "Provide replicateImageBase64 for the same rendered PDF page.",
+            requestId: correlationId,
+          },
+          commonHeaders,
+        );
         return;
       }
 
-      const result = await analyzeBaytiCore({
-        tectlyFile,
-        fileName: body.fileName,
-        sourceImage: body.sourceImage,
-        replicateImage,
-        wallTracingMode: body.wallTracingMode,
-        verifierMode: body.verifierMode,
+      const fingerprint = requestFingerprint(body);
+      const run = await analysisRegistry.run(idempotencyKey, fingerprint, async () => {
+        const tectlyFile = decodeBlob(body.fileBase64, body.fileMimeType);
+        const replicateImage = body.replicateImageBase64
+          ? decodeBlob(
+              body.replicateImageBase64,
+              body.replicateImageMimeType ?? body.sourceImage.mimeType,
+            )
+          : tectlyFile;
+
+        return analyzeBaytiCore({
+          tectlyFile,
+          fileName: body.fileName,
+          sourceImage: body.sourceImage,
+          replicateImage,
+          wallTracingMode: body.wallTracingMode,
+          verifierMode: body.verifierMode,
+        });
       });
 
-      sendJson(response, 200, result);
+      sendJson(response, 200, run.value, {
+        ...commonHeaders,
+        "x-idempotency-replayed": run.replayed ? "true" : "false",
+      });
     } catch (error) {
       const safe = safeError(error);
-      sendJson(response, safe.status, { error: safe.code, message: safe.message });
+      if (safe.status >= 500) {
+        console.error(`[analysis ${correlationId}] ${errorMessage(error)}`);
+      }
+      sendJson(
+        response,
+        safe.status,
+        { error: safe.code, message: safe.message, requestId: correlationId },
+        commonHeaders,
+      );
     }
     return;
   }
 
-  sendJson(response, 404, { error: "NOT_FOUND" });
+  sendJson(response, 404, { error: "NOT_FOUND", requestId: correlationId }, commonHeaders);
 });
 
 server.listen(PORT, "0.0.0.0", () => {
