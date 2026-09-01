@@ -105,8 +105,8 @@ export function mapTectlyBundleToCanonical(
   const scale = scaleFromTectly(bundle, sourceImage);
   let fittedWallCount = 0;
 
-  const roomIdMap = new Map(
-    bundle.rooms.map((room, index) => [room.id, `room-${index + 1}`] as const),
+  const roomIdMap = new Map<string, string>(
+    bundle.rooms.map((room, index) => [room.id, `room-${index + 1}`]),
   );
 
   const walls: CanonicalWall[] = bundle.walls.map((wall, index) => {
@@ -142,7 +142,13 @@ export function mapTectlyBundleToCanonical(
     };
     const hostWallId = inferOpeningHostWallId(centerLine, walls, sourceImage);
     const widthMeters = openingWidthMeters(centerLine, scale);
-    const connectedRoomIds = [...new Set(opening.rooms.map((id) => roomIdMap.get(id)).filter((id): id is string => id !== undefined))];
+    const connectedRoomIds: string[] = [];
+    for (const providerRoomId of opening.rooms) {
+      const canonicalRoomId = roomIdMap.get(providerRoomId);
+      if (canonicalRoomId !== undefined && !connectedRoomIds.includes(canonicalRoomId)) {
+        connectedRoomIds.push(canonicalRoomId);
+      }
+    }
     const unknownRoomRefs = opening.rooms.length - connectedRoomIds.length;
     if (unknownRoomRefs > 0) unknownTopologyReferenceCount += unknownRoomRefs;
     if (connectedRoomIds.length > 0) topologizedOpeningCount += 1;
