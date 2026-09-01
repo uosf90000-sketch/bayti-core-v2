@@ -11,6 +11,7 @@ import {
   IdempotencyRegistry,
   type IdempotencyStore,
 } from "./idempotency.js";
+import { baytiEngineLabHtml } from "./lab.js";
 import { PostgresIdempotencyStore } from "./postgres-idempotency.js";
 
 const DEFAULT_MAX_BODY_BYTES = 35 * 1024 * 1024;
@@ -29,6 +30,7 @@ const IDEMPOTENCY_DATABASE_URL =
 const REQUIRE_PERSISTENT_IDEMPOTENCY = /^(1|true|yes)$/i.test(
   process.env.BAYTI_CORE_REQUIRE_PERSISTENT_IDEMPOTENCY?.trim() ?? "false",
 );
+const LAB_KEY = process.env.BAYTI_CORE_LAB_KEY?.trim() || null;
 
 function idempotencyStore(): IdempotencyStore<BaytiCoreAnalysisResult> | undefined {
   // Shared Postgres is preferred because its atomic claim also protects multi-replica deployments.
@@ -78,6 +80,23 @@ function sendJson(
   response.end(payload);
 }
 
+function sendHtml(
+  response: ServerResponse,
+  statusCode: number,
+  html: string,
+  headers: Record<string, string> = {},
+): void {
+  response.writeHead(statusCode, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": Buffer.byteLength(html),
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    ...headers,
+  });
+  response.end(html);
+}
+
 function firstHeader(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) return value[0]?.trim() || null;
   return value?.trim() || null;
@@ -107,6 +126,12 @@ function authorized(request: IncomingMessage): boolean {
   const supplied = bearerToken(request);
   if (!expected || !supplied) return false;
   return safeEqual(supplied, expected);
+}
+
+function labAuthorized(request: IncomingMessage): boolean {
+  const supplied = firstHeader(request.headers["x-bayti-lab-key"]);
+  if (!LAB_KEY || !supplied) return false;
+  return safeEqual(supplied, LAB_KEY);
 }
 
 function readIdempotencyKey(request: IncomingMessage): string | null {
@@ -221,6 +246,13 @@ function safeError(error: unknown): { status: number; code: string; message: str
   if (message === "REQUEST_BODY_TOO_LARGE") {
     return { status: 413, code: message, message: "Request body is too large." };
   }
+  if (message === "PDF_REQUIRES_REPLICATE_RASTER") {
+    return {
+      status: 400,
+      code: message,
+      message: "PDF analysis requires a raster image of the same page for the independent verifier.",
+    };
+  }
   if (message === "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST") {
     return {
       status: 409,
@@ -248,6 +280,86 @@ function safeError(error: unknown): { status: number; code: string; message: str
     code: "PROVIDER_ANALYSIS_FAILED",
     message: "Floor-plan provider analysis failed.",
   };
+}
+
+async function executeAnalysis(
+  body: AnalyzeRequestBody,
+  idempotencyKey: string,
+): Promise<{ value: BaytiCoreAnalysisResult; replayed: boolean }> {
+  if (body.fileMimeType.toLowerCase().includes("pdf") && !body.replicateImageBase64) {
+    throw new Error("PDF_REQUIRES_REPLICATE_RASTER");
+  }
+
+  const fingerprint = requestFingerprint(body);
+  return analysisRegistry.run(idempotencyKey, fingerprint, async () => {
+    const tectlyFile = decodeBlob(body.fileBase64, body.fileMimeType);
+    const replicateImage = body.replicateImageBase64
+      ? decodeBlob(
+          body.replicateImageBase64,
+          body.replicateImageMimeType ?? body.sourceImage.mimeType,
+        )
+      : tectlyFile;
+
+    return analyzeBaytiCore({
+      tectlyFile,
+      fileName: body.fileName,
+      sourceImage: body.sourceImage,
+      replicateImage,
+      wallTracingMode: body.wallTracingMode,
+      verifierMode: body.verifierMode,
+    });
+  });
+}
+
+function idempotencyRequired(
+  request: IncomingMessage,
+  response: ServerResponse,
+  correlationId: string,
+  commonHeaders: Record<string, string>,
+): string | null {
+  const idempotencyKey = readIdempotencyKey(request);
+  if (idempotencyKey !== null) return idempotencyKey;
+  sendJson(
+    response,
+    400,
+    {
+      error: "IDEMPOTENCY_KEY_REQUIRED",
+      message: "Send a stable Idempotency-Key header (8–200 characters) for each logical analysis.",
+      requestId: correlationId,
+    },
+    commonHeaders,
+  );
+  return null;
+}
+
+async function handleAnalysis(
+  request: IncomingMessage,
+  response: ServerResponse,
+  correlationId: string,
+  commonHeaders: Record<string, string>,
+): Promise<void> {
+  const idempotencyKey = idempotencyRequired(request, response, correlationId, commonHeaders);
+  if (idempotencyKey === null) return;
+
+  try {
+    const body = parseAnalyzeBody(await readJsonBody(request));
+    const run = await executeAnalysis(body, idempotencyKey);
+    sendJson(response, 200, run.value, {
+      ...commonHeaders,
+      "x-idempotency-replayed": run.replayed ? "true" : "false",
+    });
+  } catch (error) {
+    const safe = safeError(error);
+    if (safe.status >= 500) {
+      console.error(`[analysis ${correlationId}] ${errorMessage(error)}`);
+    }
+    sendJson(
+      response,
+      safe.status,
+      { error: safe.code, message: safe.message, requestId: correlationId },
+      commonHeaders,
+    );
+  }
 }
 
 const server = createServer(async (request, response) => {
@@ -302,6 +414,7 @@ const server = createServer(async (request, response) => {
         tectlyConfigured,
         replicateConfigured,
         apiKeyConfigured,
+        labConfigured: LAB_KEY !== null,
         idempotencyMode: analysisRegistry.mode,
         idempotencyWritable,
         persistentIdempotencyRequired: REQUIRE_PERSISTENT_IDEMPOTENCY,
@@ -316,80 +429,30 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (method === "GET" && url.pathname === "/lab") {
+    if (LAB_KEY === null) {
+      sendJson(response, 404, { error: "LAB_DISABLED", requestId: correlationId }, commonHeaders);
+      return;
+    }
+    sendHtml(response, 200, baytiEngineLabHtml(), commonHeaders);
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/lab/analyze") {
+    if (!labAuthorized(request)) {
+      sendJson(response, 401, { error: "UNAUTHORIZED", requestId: correlationId }, commonHeaders);
+      return;
+    }
+    await handleAnalysis(request, response, correlationId, commonHeaders);
+    return;
+  }
+
   if (method === "POST" && url.pathname === "/v1/analyze") {
     if (!authorized(request)) {
       sendJson(response, 401, { error: "UNAUTHORIZED", requestId: correlationId }, commonHeaders);
       return;
     }
-
-    const idempotencyKey = readIdempotencyKey(request);
-    if (idempotencyKey === null) {
-      sendJson(
-        response,
-        400,
-        {
-          error: "IDEMPOTENCY_KEY_REQUIRED",
-          message: "Send a stable Idempotency-Key header (8–200 characters) for each logical analysis.",
-          requestId: correlationId,
-        },
-        commonHeaders,
-      );
-      return;
-    }
-
-    try {
-      const body = parseAnalyzeBody(await readJsonBody(request));
-
-      if (body.fileMimeType.toLowerCase().includes("pdf") && !body.replicateImageBase64) {
-        sendJson(
-          response,
-          400,
-          {
-            error: "PDF_REQUIRES_REPLICATE_RASTER",
-            message: "Provide replicateImageBase64 for the same rendered PDF page.",
-            requestId: correlationId,
-          },
-          commonHeaders,
-        );
-        return;
-      }
-
-      const fingerprint = requestFingerprint(body);
-      const run = await analysisRegistry.run(idempotencyKey, fingerprint, async () => {
-        const tectlyFile = decodeBlob(body.fileBase64, body.fileMimeType);
-        const replicateImage = body.replicateImageBase64
-          ? decodeBlob(
-              body.replicateImageBase64,
-              body.replicateImageMimeType ?? body.sourceImage.mimeType,
-            )
-          : tectlyFile;
-
-        return analyzeBaytiCore({
-          tectlyFile,
-          fileName: body.fileName,
-          sourceImage: body.sourceImage,
-          replicateImage,
-          wallTracingMode: body.wallTracingMode,
-          verifierMode: body.verifierMode,
-        });
-      });
-
-      sendJson(response, 200, run.value, {
-        ...commonHeaders,
-        "x-idempotency-replayed": run.replayed ? "true" : "false",
-      });
-    } catch (error) {
-      const safe = safeError(error);
-      if (safe.status >= 500) {
-        console.error(`[analysis ${correlationId}] ${errorMessage(error)}`);
-      }
-      sendJson(
-        response,
-        safe.status,
-        { error: safe.code, message: safe.message, requestId: correlationId },
-        commonHeaders,
-      );
-    }
+    await handleAnalysis(request, response, correlationId, commonHeaders);
     return;
   }
 
@@ -398,7 +461,7 @@ const server = createServer(async (request, response) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(
-    `Bayti Core V2 listening on port ${PORT} (idempotency=${analysisRegistry.mode}, persistentRequired=${REQUIRE_PERSISTENT_IDEMPOTENCY})`,
+    `Bayti Core V2 listening on port ${PORT} (idempotency=${analysisRegistry.mode}, persistentRequired=${REQUIRE_PERSISTENT_IDEMPOTENCY}, lab=${LAB_KEY ? "enabled" : "disabled"})`,
   );
 });
 
