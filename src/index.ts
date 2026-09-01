@@ -2,6 +2,7 @@ export * from "./core.js";
 export * from "./domain/canonical.js";
 export * from "./fusion/fuse.js";
 export * from "./idempotency.js";
+export * from "./observation.js";
 export * from "./postgres-idempotency.js";
 export * from "./providers/replicate-client.js";
 export * from "./providers/replicate-parser.js";
