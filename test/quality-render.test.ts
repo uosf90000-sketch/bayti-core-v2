@@ -101,7 +101,7 @@ describe("geometry quality and render contract", () => {
     const report = assessGeometryQuality(missing);
     expect(report.status).toBe("blocked");
     expect(report.blockers).toContain("No room polygons are available for room-level design.");
-    expect(report.blockers).toContain("Real-world scale is unknown.");
+    expect(report.blockers).toContain("Complete real-world X/Y scale is unknown.");
   });
 
   it("preserves polygon-only walls in the future 3D handoff", () => {
