@@ -44,7 +44,7 @@ const bundle: TectlyPlanBundle = {
 };
 
 describe("mapTectlyBundleToCanonical", () => {
-  it("maps plan-local coordinates and safely derives a center line only for a simple wall bar", () => {
+  it("maps coordinates, fits simple walls, and hosts an unambiguous opening", () => {
     const plan = mapTectlyBundleToCanonical(bundle, {
       widthPx: 1000,
       heightPx: 500,
@@ -62,6 +62,8 @@ describe("mapTectlyBundleToCanonical", () => {
     expect(plan.walls[0]?.thicknessMeters).toBeCloseTo(0.5);
     expect(plan.openings[0]?.centerLine.start.x).toBeCloseTo(0.2);
     expect(plan.openings[0]?.centerLine.start.y).toBeCloseTo(0.24);
+    expect(plan.openings[0]?.hostWallId).toBe("wall-1");
+    expect(plan.openings[0]?.widthMeters).toBeCloseTo(2);
     expect(plan.scale.metersPerNormalizedX).toBeCloseTo(20);
     expect(plan.scale.metersPerNormalizedY).toBeCloseTo(12.5);
     expect(plan.scale.metersPerPixelX).toBeCloseTo(0.02);
