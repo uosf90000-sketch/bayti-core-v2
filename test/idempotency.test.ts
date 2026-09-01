@@ -22,21 +22,26 @@ describe("IdempotencyRegistry", () => {
 
   it("coalesces simultaneous requests before either can start a second paid operation", async () => {
     const registry = new IdempotencyRegistry<string>();
-    let release: ((value: string) => void) | undefined;
-    const providerResult = new Promise<string>((resolve) => {
-      release = resolve;
+    let releaseProvider: ((value: string) => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
     });
-    const operation = vi.fn(() => providerResult);
+    const providerResult = new Promise<string>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const operation = vi.fn(() => {
+      markStarted?.();
+      return providerResult;
+    });
 
     const firstPromise = registry.run("analysis-123", "fingerprint-a", operation);
     const secondPromise = registry.run("analysis-123", "fingerprint-a", operation);
 
-    // Allow the first execution to reach the provider operation.
-    await Promise.resolve();
-    await Promise.resolve();
+    await started;
     expect(operation).toHaveBeenCalledTimes(1);
 
-    release?.("result");
+    releaseProvider?.("result");
     const [first, second] = await Promise.all([firstPromise, secondPromise]);
 
     expect(first).toEqual({ value: "result", replayed: false });
