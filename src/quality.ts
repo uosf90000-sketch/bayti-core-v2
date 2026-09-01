@@ -37,6 +37,8 @@ export interface GeometryQualityMetrics {
   openingConfirmationRate: number;
   hostedOpeningRate: number;
   supportedOpeningRate: number;
+  /** UI/backward-compatible alias for supportedOpeningRate. */
+  openingHostCoverage: number;
   measuredOpeningRate: number;
   complexWallCount: number;
   conflictCount: number;
@@ -95,6 +97,7 @@ export function assessGeometryQuality(
     plan.scale.metersPerNormalizedX > 0 &&
     plan.scale.metersPerNormalizedY !== null &&
     plan.scale.metersPerNormalizedY > 0;
+  const supportedOpeningRate = rate(supportedOpeningCount, plan.openings.length, 1);
 
   const metrics: GeometryQualityMetrics = {
     wallCount: plan.walls.length,
@@ -108,7 +111,8 @@ export function assessGeometryQuality(
     wallConfirmationRate: rate(confirmedWallCount, plan.walls.length, 0),
     openingConfirmationRate: rate(confirmedOpeningCount, plan.openings.length, 1),
     hostedOpeningRate: rate(hostedOpeningCount, plan.openings.length, 1),
-    supportedOpeningRate: rate(supportedOpeningCount, plan.openings.length, 1),
+    supportedOpeningRate,
+    openingHostCoverage: supportedOpeningRate,
     measuredOpeningRate: rate(measuredOpeningCount, plan.openings.length, 1),
     complexWallCount,
     conflictCount: plan.qa.conflicts.length,
