@@ -133,6 +133,7 @@ export function mapTectlyBundleToCanonical(
   let measuredOpeningCount = 0;
   let topologizedOpeningCount = 0;
   let unknownTopologyReferenceCount = 0;
+  let missingTopologyListCount = 0;
   const openings: CanonicalOpening[] = bundle.wallOpenings.map((opening, index) => {
     const [a, b] = openingLine(opening.details);
     const kind = tectlyOpeningKind(opening.details);
@@ -143,13 +144,18 @@ export function mapTectlyBundleToCanonical(
     const hostWallId = inferOpeningHostWallId(centerLine, walls, sourceImage);
     const widthMeters = openingWidthMeters(centerLine, scale);
     const connectedRoomIds: string[] = [];
-    for (const providerRoomId of opening.rooms) {
+    const providerRoomIds = Array.isArray(opening.rooms)
+      ? opening.rooms.filter((roomId): roomId is string => typeof roomId === "string")
+      : [];
+    if (!Array.isArray(opening.rooms)) missingTopologyListCount += 1;
+
+    for (const providerRoomId of providerRoomIds) {
       const canonicalRoomId = roomIdMap.get(providerRoomId);
       if (canonicalRoomId !== undefined && !connectedRoomIds.includes(canonicalRoomId)) {
         connectedRoomIds.push(canonicalRoomId);
       }
     }
-    const unknownRoomRefs = opening.rooms.length - connectedRoomIds.length;
+    const unknownRoomRefs = providerRoomIds.length - connectedRoomIds.length;
     if (unknownRoomRefs > 0) unknownTopologyReferenceCount += unknownRoomRefs;
     if (connectedRoomIds.length > 0) topologizedOpeningCount += 1;
 
@@ -164,7 +170,7 @@ export function mapTectlyBundleToCanonical(
       hostWallId,
       widthMeters,
       connectedRoomIds,
-      // Tectly's room-id list is preserved, but Core does not equate "one room" with exterior.
+      // Tectly's room-id list is preserved when present, but Core does not equate "one room" with exterior.
       connectsToExterior: null,
       confidence: {
         score: 0.82,
@@ -212,6 +218,11 @@ export function mapTectlyBundleToCanonical(
     qaNotes.push(
       `Opening topology: ${topologizedOpeningCount}/${openings.length} openings include provider-backed room connectivity; exterior connectivity remains unknown unless explicit evidence exists.`,
     );
+    if (missingTopologyListCount > 0) {
+      qaNotes.push(
+        `Opening topology warning: ${missingTopologyListCount} opening(s) did not include a provider room-id list; connectivity was left unknown instead of inferred.`,
+      );
+    }
     if (unknownTopologyReferenceCount > 0) {
       qaNotes.push(
         `Opening topology warning: ${unknownTopologyReferenceCount} provider room reference(s) did not resolve to a room in the current plan.`,
