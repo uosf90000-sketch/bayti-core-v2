@@ -1,4 +1,5 @@
 import type { CanonicalPlan } from "./domain/canonical.js";
+import { validateCanonicalPlan, type CanonicalValidationReport } from "./validation.js";
 
 export interface GeometryQualityPolicy {
   minWallConfirmationRate: number;
@@ -43,6 +44,7 @@ export interface GeometryQualityMetrics {
 export interface GeometryQualityReport {
   status: "pass" | "review" | "blocked";
   metrics: GeometryQualityMetrics;
+  validation: CanonicalValidationReport;
   blockers: string[];
   reviewReasons: string[];
   policy: GeometryQualityPolicy;
@@ -66,6 +68,7 @@ export function assessGeometryQuality(
   validRatio(policy.minOpeningConfirmationRate, "minOpeningConfirmationRate");
   validRatio(policy.minHostedOpeningRate, "minHostedOpeningRate");
 
+  const validation = validateCanonicalPlan(plan);
   const confirmedWallCount = plan.walls.filter(
     (wall) => wall.confidence.agreement === "confirmed",
   ).length;
@@ -100,8 +103,10 @@ export function assessGeometryQuality(
     hasKnownScale,
   };
 
-  const blockers: string[] = [];
-  const reviewReasons: string[] = [];
+  const blockers: string[] = validation.errors.map((error) => `Invalid canonical geometry: ${error}`);
+  const reviewReasons: string[] = validation.warnings.map(
+    (warning) => `Canonical geometry warning: ${warning}`,
+  );
 
   if (plan.walls.length === 0) blockers.push("No wall geometry is available.");
   if (policy.requireRooms && plan.rooms.length === 0) {
@@ -139,5 +144,12 @@ export function assessGeometryQuality(
   const status: GeometryQualityReport["status"] =
     blockers.length > 0 ? "blocked" : reviewReasons.length > 0 ? "review" : "pass";
 
-  return { status, metrics, blockers, reviewReasons, policy: { ...policy } };
+  return {
+    status,
+    metrics,
+    validation,
+    blockers,
+    reviewReasons,
+    policy: { ...policy },
+  };
 }
