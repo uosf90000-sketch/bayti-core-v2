@@ -20,6 +20,30 @@ describe("IdempotencyRegistry", () => {
     expect(operation).toHaveBeenCalledTimes(1);
   });
 
+  it("coalesces simultaneous requests before either can start a second paid operation", async () => {
+    const registry = new IdempotencyRegistry<string>();
+    let release: ((value: string) => void) | undefined;
+    const providerResult = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const operation = vi.fn(() => providerResult);
+
+    const firstPromise = registry.run("analysis-123", "fingerprint-a", operation);
+    const secondPromise = registry.run("analysis-123", "fingerprint-a", operation);
+
+    // Allow the first execution to reach the provider operation.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(operation).toHaveBeenCalledTimes(1);
+
+    release?.("result");
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+    expect(first).toEqual({ value: "result", replayed: false });
+    expect(second).toEqual({ value: "result", replayed: true });
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects reuse of a key for a different request", async () => {
     const registry = new IdempotencyRegistry<string>();
     await registry.run("analysis-123", "fingerprint-a", async () => "first");
