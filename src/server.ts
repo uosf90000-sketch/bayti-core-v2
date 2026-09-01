@@ -1,7 +1,17 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { analyzeBaytiCore, type BaytiCoreAnalysisResult, type VerifierMode } from "./core.js";
-import { FileIdempotencyStore, IdempotencyRegistry } from "./idempotency.js";
+import {
+  analyzeBaytiCore,
+  BAYTI_CORE_VERSION,
+  type BaytiCoreAnalysisResult,
+  type VerifierMode,
+} from "./core.js";
+import {
+  FileIdempotencyStore,
+  IdempotencyRegistry,
+  type IdempotencyStore,
+} from "./idempotency.js";
+import { PostgresIdempotencyStore } from "./postgres-idempotency.js";
 
 const DEFAULT_MAX_BODY_BYTES = 35 * 1024 * 1024;
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10);
@@ -14,14 +24,27 @@ const IDEMPOTENCY_TTL_MS = Number.parseInt(
   10,
 );
 const IDEMPOTENCY_DIR = process.env.BAYTI_CORE_IDEMPOTENCY_DIR?.trim() || null;
+const IDEMPOTENCY_DATABASE_URL =
+  process.env.BAYTI_CORE_IDEMPOTENCY_DATABASE_URL?.trim() || null;
 const REQUIRE_PERSISTENT_IDEMPOTENCY = /^(1|true|yes)$/i.test(
   process.env.BAYTI_CORE_REQUIRE_PERSISTENT_IDEMPOTENCY?.trim() ?? "false",
 );
 
+function idempotencyStore(): IdempotencyStore<BaytiCoreAnalysisResult> | undefined {
+  // Shared Postgres is preferred because its atomic claim also protects multi-replica deployments.
+  if (IDEMPOTENCY_DATABASE_URL) {
+    return new PostgresIdempotencyStore<BaytiCoreAnalysisResult>(IDEMPOTENCY_DATABASE_URL);
+  }
+  if (IDEMPOTENCY_DIR) {
+    return new FileIdempotencyStore<BaytiCoreAnalysisResult>(IDEMPOTENCY_DIR);
+  }
+  return undefined;
+}
+
 const analysisRegistry = new IdempotencyRegistry<BaytiCoreAnalysisResult>(
   IDEMPOTENCY_TTL_MS,
   () => Date.now(),
-  IDEMPOTENCY_DIR ? new FileIdempotencyStore<BaytiCoreAnalysisResult>(IDEMPOTENCY_DIR) : undefined,
+  idempotencyStore(),
 );
 
 interface AnalyzeRequestBody {
@@ -223,7 +246,6 @@ function safeError(error: unknown): { status: number; code: string; message: str
   return {
     status: 502,
     code: "PROVIDER_ANALYSIS_FAILED",
-    // Provider internals stay in server logs; callers get a correlation id instead.
     message: "Floor-plan provider analysis failed.",
   };
 }
@@ -241,7 +263,7 @@ const server = createServer(async (request, response) => {
       {
         status: "ok",
         service: "bayti-core-v2",
-        version: "0.5.0",
+        version: BAYTI_CORE_VERSION,
         idempotencyMode: analysisRegistry.mode,
       },
       commonHeaders,
@@ -255,7 +277,7 @@ const server = createServer(async (request, response) => {
     );
     const replicateConfigured = Boolean(process.env.REPLICATE_API_TOKEN?.trim());
     const apiKeyConfigured = Boolean(process.env.BAYTI_CORE_API_KEY?.trim());
-    const persistentIdempotency = analysisRegistry.mode === "file";
+    const persistentIdempotency = analysisRegistry.mode !== "memory";
     let idempotencyWritable = true;
     let idempotencyMessage: string | null = null;
     try {
@@ -379,3 +401,19 @@ server.listen(PORT, "0.0.0.0", () => {
     `Bayti Core V2 listening on port ${PORT} (idempotency=${analysisRegistry.mode}, persistentRequired=${REQUIRE_PERSISTENT_IDEMPOTENCY})`,
   );
 });
+
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Bayti Core V2 received ${signal}; closing shared resources.`);
+  server.close();
+  try {
+    await analysisRegistry.close();
+  } finally {
+    process.exit(0);
+  }
+}
+
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));
