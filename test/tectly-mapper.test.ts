@@ -26,7 +26,6 @@ const bundle: TectlyPlanBundle = {
       caption: "Living",
       type: "LivingRoom",
       boundary: [[0, 0.1], [1, 0.1], [1, 1], [0, 1]],
-      // Deliberately inconsistent with polygon+scale. Core must not trust this as m².
       area: 20,
     },
   ],
@@ -95,6 +94,27 @@ describe("mapTectlyBundleToCanonical", () => {
     expect(plan.scale.source).toBe("unknown");
     expect(plan.rooms[0]?.areaSquareMeters).toBeNull();
     expect(plan.openings[0]?.widthMeters).toBeNull();
+  });
+
+  it("uses a vertical-only Tectly scale isotropically instead of leaving X unknown", () => {
+    const verticalOnly: TectlyPlanBundle = {
+      ...bundle,
+      floor: { id: "floor-1", verticalScale: 0.2 },
+    };
+
+    const plan = mapTectlyBundleToCanonical(verticalOnly, {
+      widthPx: 1000,
+      heightPx: 500,
+      mimeType: "image/jpeg",
+    });
+
+    expect(plan.scale.source).toBe("tectly");
+    expect(plan.scale.metersPerPixelY).toBeCloseTo(0.025);
+    expect(plan.scale.metersPerPixelX).toBeCloseTo(0.025);
+    expect(plan.scale.metersPerNormalizedY).toBeCloseTo(12.5);
+    expect(plan.scale.metersPerNormalizedX).toBeCloseTo(25);
+    expect(plan.rooms[0]?.areaSquareMeters).not.toBeNull();
+    expect(plan.openings[0]?.widthMeters).not.toBeNull();
   });
 
   it("keeps missing provider topology unknown instead of guessing room connectivity", () => {

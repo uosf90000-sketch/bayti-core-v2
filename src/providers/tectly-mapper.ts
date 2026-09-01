@@ -60,13 +60,21 @@ function scaleFromTectly(bundle: TectlyPlanBundle, source: SourceImageInfo): Pla
   if (typeof vertical === "number" && vertical > 0 && section.height > 0) {
     metersPerNormalizedY = 1 / (vertical * section.height);
     metersPerPixelY = metersPerNormalizedY / source.heightPx;
-  } else if (metersPerPixelX !== null) {
-    // Raster/PDF render pixels share one physical scale. This keeps Y usable when Tectly only exposes horizontal scale.
-    metersPerPixelY = metersPerPixelX;
-    metersPerNormalizedY = metersPerPixelX * source.heightPx;
   }
 
-  const known = metersPerNormalizedX !== null || metersPerNormalizedY !== null;
+  // Raster/PDF render pixels are square in the canonical source raster. When Tectly
+  // exposes only one physical axis, preserve the same metres-per-pixel on the missing
+  // axis instead of leaving half of the canonical scale unusable. This fallback is
+  // deliberately symmetric for horizontal-only and vertical-only provider results.
+  if (metersPerPixelX !== null && metersPerPixelY === null) {
+    metersPerPixelY = metersPerPixelX;
+    metersPerNormalizedY = metersPerPixelX * source.heightPx;
+  } else if (metersPerPixelY !== null && metersPerPixelX === null) {
+    metersPerPixelX = metersPerPixelY;
+    metersPerNormalizedX = metersPerPixelY * source.widthPx;
+  }
+
+  const known = metersPerNormalizedX !== null && metersPerNormalizedY !== null;
   return {
     metersPerPixelX,
     metersPerPixelY,
@@ -117,8 +125,6 @@ export function mapTectlyBundleToCanonical(
     return {
       id: `wall-${index + 1}`,
       footprint,
-      // Critical V2 rule: wall polygons stay authoritative. A center line is derived
-      // only for a thin, strongly rectangular footprint; complex/curved chains remain null.
       geometry: fit?.geometry ?? null,
       thicknessMeters: fit?.thicknessMeters ?? null,
       confidence: {
@@ -170,14 +176,10 @@ export function mapTectlyBundleToCanonical(
       id: `opening-${index + 1}`,
       kind,
       centerLine,
-      // A single host is retained only when one footprint clearly supports the opening.
-      // Polygon tracing can split a logical wall at the opening void, in which case the
-      // two endpoint-supporting fragments are preserved instead of choosing one falsely.
       hostWallId: wallSupport.hostWallId,
       supportingWallIds: wallSupport.supportingWallIds,
       widthMeters,
       connectedRoomIds,
-      // Tectly's room-id list is preserved when present, but Core does not equate "one room" with exterior.
       connectsToExterior: null,
       confidence: {
         score: 0.82,
@@ -197,9 +199,6 @@ export function mapTectlyBundleToCanonical(
       id: `room-${index + 1}`,
       label: room.caption ?? room.type ?? null,
       polygon,
-      // Tectly can expose a numeric `area` even when scale processing failed. That value
-      // is not safe to label as square metres. Canonical m² is therefore derived only
-      // from the mapped polygon and trusted physical X/Y scale.
       areaSquareMeters,
       confidence: {
         score: 0.85,
