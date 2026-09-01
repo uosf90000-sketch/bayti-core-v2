@@ -13,6 +13,7 @@ import type {
   TectlyPlanBundle,
   TectlyPoint,
 } from "./tectly-types.js";
+import { inferOpeningHostWallId, openingWidthMeters } from "./opening-host.js";
 import { tectlyOpeningKind } from "./tectly-types.js";
 import { fitStraightWallFootprint } from "./wall-fit.js";
 
@@ -104,18 +105,27 @@ export function mapTectlyBundleToCanonical(
     };
   });
 
+  let hostedOpeningCount = 0;
+  let measuredOpeningCount = 0;
   const openings: CanonicalOpening[] = bundle.wallOpenings.map((opening, index) => {
     const [a, b] = openingLine(opening.details);
     const kind = tectlyOpeningKind(opening.details);
+    const centerLine = {
+      start: mapTectlyPointToPage(a, section),
+      end: mapTectlyPointToPage(b, section),
+    };
+    const hostWallId = inferOpeningHostWallId(centerLine, walls, sourceImage);
+    const widthMeters = openingWidthMeters(centerLine, scale);
+    if (hostWallId !== null) hostedOpeningCount += 1;
+    if (widthMeters !== null) measuredOpeningCount += 1;
+
     return {
       id: `opening-${index + 1}`,
       kind,
-      centerLine: {
-        start: mapTectlyPointToPage(a, section),
-        end: mapTectlyPointToPage(b, section),
-      },
-      hostWallId: null,
-      widthMeters: null,
+      centerLine,
+      // This is geometric inference, not a provider claim. Ambiguous junctions remain null.
+      hostWallId,
+      widthMeters,
       confidence: {
         score: 0.82,
         agreement: "single-source",
@@ -143,6 +153,11 @@ export function mapTectlyBundleToCanonical(
   if (walls.length > 0) {
     qaNotes.push(
       `Safe straight-wall fitting: ${fittedWallCount}/${walls.length} wall footprints received derived center lines; complex footprints remain polygon-only.`,
+    );
+  }
+  if (openings.length > 0) {
+    qaNotes.push(
+      `Opening geometry: ${hostedOpeningCount}/${openings.length} openings received an unambiguous host wall; ${measuredOpeningCount}/${openings.length} received a physical width.`,
     );
   }
 
