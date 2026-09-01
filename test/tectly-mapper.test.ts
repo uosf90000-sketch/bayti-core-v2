@@ -44,7 +44,7 @@ const bundle: TectlyPlanBundle = {
 };
 
 describe("mapTectlyBundleToCanonical", () => {
-  it("maps plan-local Tectly coordinates into full-page coordinates without flattening wall polygons", () => {
+  it("maps plan-local coordinates and safely derives a center line only for a simple wall bar", () => {
     const plan = mapTectlyBundleToCanonical(bundle, {
       widthPx: 1000,
       heightPx: 500,
@@ -53,12 +53,19 @@ describe("mapTectlyBundleToCanonical", () => {
 
     expect(plan.walls[0]?.footprint[0]).toEqual({ x: 0.1, y: 0.2 });
     expect(plan.walls[0]?.footprint[1]).toEqual({ x: 0.6, y: 0.2 });
-    expect(plan.walls[0]?.geometry).toBeNull();
+    expect(plan.walls[0]?.geometry?.type).toBe("line");
+    if (plan.walls[0]?.geometry?.type === "line") {
+      expect(plan.walls[0].geometry.start.y).toBeCloseTo(0.22);
+      expect(plan.walls[0].geometry.end.y).toBeCloseTo(0.22);
+      expect(Math.abs(plan.walls[0].geometry.end.x - plan.walls[0].geometry.start.x)).toBeCloseTo(0.5);
+    }
+    expect(plan.walls[0]?.thicknessMeters).toBeCloseTo(0.5);
     expect(plan.openings[0]?.centerLine.start.x).toBeCloseTo(0.2);
     expect(plan.openings[0]?.centerLine.start.y).toBeCloseTo(0.24);
     expect(plan.scale.metersPerNormalizedX).toBeCloseTo(20);
     expect(plan.scale.metersPerNormalizedY).toBeCloseTo(12.5);
     expect(plan.scale.metersPerPixelX).toBeCloseTo(0.02);
     expect(plan.scale.metersPerPixelY).toBeCloseTo(0.025);
+    expect(plan.qa.notes.some((note) => note.includes("1/1"))).toBe(true);
   });
 });
