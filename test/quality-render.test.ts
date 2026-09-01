@@ -5,7 +5,7 @@ import { buildBaytiRenderContract } from "../src/render-contract.js";
 
 function plan(): CanonicalPlan {
   return {
-    schemaVersion: "2.1",
+    schemaVersion: "2.2",
     sourceImage: { widthPx: 1000, heightPx: 1000, mimeType: "image/jpeg" },
     scale: {
       metersPerPixelX: 0.01,
@@ -46,6 +46,8 @@ function plan(): CanonicalPlan {
         centerLine: { start: { x: 0.25, y: 0.1 }, end: { x: 0.35, y: 0.1 } },
         hostWallId: "wall-1",
         widthMeters: 1,
+        connectedRoomIds: ["room-1"],
+        connectsToExterior: true,
         confidence: {
           score: 0.96,
           agreement: "confirmed",
@@ -89,6 +91,8 @@ describe("geometry quality and render contract", () => {
   it("blocks room-level product geometry when rooms or scale are missing", () => {
     const missing = plan();
     missing.rooms = [];
+    missing.openings[0]!.connectedRoomIds = [];
+    missing.openings[0]!.connectsToExterior = null;
     missing.scale = {
       metersPerPixelX: null,
       metersPerPixelY: null,
@@ -104,12 +108,15 @@ describe("geometry quality and render contract", () => {
     expect(report.blockers).toContain("Complete real-world X/Y scale is unknown.");
   });
 
-  it("preserves polygon-only walls in the future 3D handoff", () => {
+  it("preserves polygon-only walls and topology in the future 3D handoff", () => {
     const contract = buildBaytiRenderContract(plan());
+    expect(contract.schemaVersion).toBe("1.1");
     expect(contract.quality.status).toBe("pass");
     expect(contract.walls[0]?.geometry).toBeNull();
     expect(contract.walls[0]?.footprint).toHaveLength(6);
     expect(contract.openings).toHaveLength(1);
+    expect(contract.openings[0]?.connectedRoomIds).toEqual(["room-1"]);
+    expect(contract.openings[0]?.connectsToExterior).toBe(true);
     expect(contract.unresolvedOpenings).toHaveLength(0);
     expect(contract.verticalDimensions).toBe("consumer-supplied");
   });
@@ -123,6 +130,7 @@ describe("geometry quality and render contract", () => {
 
     const contract = buildBaytiRenderContract(ambiguous);
     expect(contract.openings).toHaveLength(0);
+    expect(contract.unresolvedOpenings[0]?.connectedRoomIds).toEqual(["room-1"]);
     expect(contract.unresolvedOpenings[0]?.reasons).toEqual([
       "missing-host-wall",
       "missing-physical-width",
