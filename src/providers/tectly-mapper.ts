@@ -146,12 +146,6 @@ export function mapTectlyBundleToCanonical(
     const unknownRoomRefs = opening.rooms.length - connectedRoomIds.length;
     if (unknownRoomRefs > 0) unknownTopologyReferenceCount += unknownRoomRefs;
     if (connectedRoomIds.length > 0) topologizedOpeningCount += 1;
-    const connectsToExterior =
-      connectedRoomIds.length === 0
-        ? null
-        : connectedRoomIds.length === 1
-          ? true
-          : false;
 
     if (hostWallId !== null) hostedOpeningCount += 1;
     if (widthMeters !== null) measuredOpeningCount += 1;
@@ -164,7 +158,8 @@ export function mapTectlyBundleToCanonical(
       hostWallId,
       widthMeters,
       connectedRoomIds,
-      connectsToExterior,
+      // Tectly's room-id list is preserved, but Core does not equate "one room" with exterior.
+      connectsToExterior: null,
       confidence: {
         score: 0.82,
         agreement: "single-source",
@@ -209,7 +204,7 @@ export function mapTectlyBundleToCanonical(
       `Opening geometry: ${hostedOpeningCount}/${openings.length} openings received an unambiguous host wall; ${measuredOpeningCount}/${openings.length} received a physical width.`,
     );
     qaNotes.push(
-      `Opening topology: ${topologizedOpeningCount}/${openings.length} openings include provider-backed room connectivity; empty topology remains unknown rather than guessed.`,
+      `Opening topology: ${topologizedOpeningCount}/${openings.length} openings include provider-backed room connectivity; exterior connectivity remains unknown unless explicit evidence exists.`,
     );
     if (unknownTopologyReferenceCount > 0) {
       qaNotes.push(
