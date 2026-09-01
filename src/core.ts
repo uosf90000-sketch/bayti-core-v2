@@ -1,4 +1,9 @@
-import type { CanonicalPlan, SourceImageInfo } from "./domain/canonical.js";
+import type {
+  CanonicalPlan,
+  NormalizedPoint2D,
+  PlanScale,
+  SourceImageInfo,
+} from "./domain/canonical.js";
 import { fuseTectlyWithReplicate } from "./fusion/fuse.js";
 import {
   inferOpeningWallSupport,
@@ -8,9 +13,11 @@ import { ReplicateFloorplanClient } from "./providers/replicate-client.js";
 import { TectlyClient } from "./providers/tectly-client.js";
 import { mapTectlyBundleToCanonical } from "./providers/tectly-mapper.js";
 import type { ReplicateVerifierResult } from "./providers/types.js";
+import { fitStraightWallFootprint } from "./providers/wall-fit.js";
 import { buildBaytiRenderContract, type BaytiRenderContract } from "./render-contract.js";
+import { deriveManualScale, type ScaleMeasurement } from "./scale-calibration.js";
 
-export const BAYTI_CORE_VERSION = "0.8.0" as const;
+export const BAYTI_CORE_VERSION = "0.9.0" as const;
 
 export type VerifierMode = "best-effort" | "required";
 export type VerifierStatus = "succeeded" | "skipped" | "failed";
@@ -49,6 +56,26 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function polygonAreaSquareMeters(points: NormalizedPoint2D[], scale: PlanScale): number | null {
+  const sx = scale.metersPerNormalizedX;
+  const sy = scale.metersPerNormalizedY;
+  if (sx === null || sy === null || sx <= 0 || sy <= 0 || points.length < 3) return null;
+
+  let twiceArea = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    if (!current || !next) continue;
+    const x1 = current.x * sx;
+    const y1 = current.y * sy;
+    const x2 = next.x * sx;
+    const y2 = next.y * sy;
+    twiceArea += x1 * y2 - x2 * y1;
+  }
+  const area = Math.abs(twiceArea) / 2;
+  return Number.isFinite(area) && area > 0 ? area : null;
+}
+
 function markVerifierUnavailable(primary: CanonicalPlan, message: string): CanonicalPlan {
   return {
     ...primary,
@@ -74,19 +101,28 @@ function mapPlans(
 }
 
 /**
- * Recomputes only deterministic Core-derived geometry from an already-paid canonical
- * result. This intentionally makes no provider/network calls, so a result persisted by
- * an older engine can benefit from newer wall-support/render logic without consuming a
- * second Tectly or Replicate analysis.
+ * Recomputes deterministic Core-derived geometry from an already-paid canonical result.
+ * No provider/network calls occur here. This is also the path used after evidence-based
+ * scale calibration so wall thicknesses, opening widths, room areas and render gates all
+ * agree on the same physical scale.
  */
 function refreshDerivedPlan(plan: CanonicalPlan): CanonicalPlan {
+  const walls = plan.walls.map((wall) => {
+    const fit = fitStraightWallFootprint(wall.footprint, plan.sourceImage, plan.scale);
+    return {
+      ...wall,
+      geometry: fit?.geometry ?? wall.geometry,
+      thicknessMeters: fit?.thicknessMeters ?? wall.thicknessMeters,
+    };
+  });
+
   let supportedOpeningCount = 0;
   let hostedOpeningCount = 0;
   let bridgedOpeningCount = 0;
   let measuredOpeningCount = 0;
 
   const openings = plan.openings.map((opening) => {
-    const wallSupport = inferOpeningWallSupport(opening.centerLine, plan.walls, plan.sourceImage);
+    const wallSupport = inferOpeningWallSupport(opening.centerLine, walls, plan.sourceImage);
     const widthMeters = openingWidthMeters(opening.centerLine, plan.scale);
 
     if (wallSupport.supportingWallIds.length > 0) supportedOpeningCount += 1;
@@ -102,21 +138,37 @@ function refreshDerivedPlan(plan: CanonicalPlan): CanonicalPlan {
     };
   });
 
+  let measuredRoomCount = 0;
+  const rooms = plan.rooms.map((room) => {
+    const areaSquareMeters = polygonAreaSquareMeters(room.polygon, plan.scale);
+    if (areaSquareMeters !== null) measuredRoomCount += 1;
+    return { ...room, areaSquareMeters };
+  });
+
   const notes = plan.qa.notes.filter(
     (note) =>
       !note.startsWith("Opening geometry:") &&
       !note.startsWith("Opening wall support:") &&
-      !note.startsWith("Opening wall support (derived refresh):"),
+      !note.startsWith("Opening wall support (derived refresh):") &&
+      !note.startsWith("Room geometry (derived refresh):") &&
+      !note.startsWith("Physical scale calibration:"),
   );
   if (openings.length > 0) {
     notes.push(
       `Opening wall support (derived refresh): ${supportedOpeningCount}/${openings.length} openings have unambiguous wall-region support (${hostedOpeningCount} single-footprint, ${bridgedOpeningCount} bridged across two fragments); ${measuredOpeningCount}/${openings.length} have a physical width.`,
     );
   }
+  if (rooms.length > 0) {
+    notes.push(
+      `Room geometry (derived refresh): ${measuredRoomCount}/${rooms.length} rooms have an area derived from canonical physical scale.`,
+    );
+  }
 
   return {
     ...plan,
+    walls,
     openings,
+    rooms,
     qa: {
       ...plan.qa,
       notes,
@@ -133,6 +185,43 @@ export function refreshDerivedAnalysisResult(
   result: Omit<BaytiCoreAnalysisResult, "engineVersion"> & { engineVersion: string },
 ): BaytiCoreAnalysisResult {
   const plans = result.plans.map((plan) => refreshDerivedPlan(plan));
+  return {
+    ...result,
+    engineVersion: BAYTI_CORE_VERSION,
+    plans,
+    renderContracts: plans.map((plan) => buildBaytiRenderContract(plan)),
+  };
+}
+
+/**
+ * Applies explicit real-world dimension evidence to an existing paid analysis. This is
+ * intentionally provider-free: it never uploads a document or starts a Replicate run.
+ * Every plan on the same raster page receives the same physical pixel scale.
+ */
+export function applyManualScaleToAnalysisResult(
+  result: Omit<BaytiCoreAnalysisResult, "engineVersion"> & { engineVersion: string },
+  measurements: ScaleMeasurement[],
+): BaytiCoreAnalysisResult {
+  if (!Array.isArray(result.plans) || result.plans.length === 0) {
+    throw new Error("MANUAL_SCALE_ANALYSIS_HAS_NO_PLANS");
+  }
+
+  const plans = result.plans.map((plan) => {
+    const calibration = deriveManualScale(measurements, plan.sourceImage);
+    const calibrated: CanonicalPlan = {
+      ...plan,
+      scale: calibration.scale,
+      qa: {
+        ...plan.qa,
+        notes: [
+          ...plan.qa.notes.filter((note) => !note.startsWith("Physical scale calibration:")),
+          `Physical scale calibration: ${calibration.measurementCount} explicit measurement(s), relative spread ${(calibration.relativeSpread * 100).toFixed(2)}%, confidence ${calibration.scale.confidence.toFixed(2)}.`,
+        ],
+      },
+    };
+    return refreshDerivedPlan(calibrated);
+  });
+
   return {
     ...result,
     engineVersion: BAYTI_CORE_VERSION,
@@ -182,7 +271,6 @@ export async function analyzeBaytiCore(
   let verifierMessage = verifierSetupMessage;
 
   if (verifierMode === "required") {
-    // In required mode, verify first. If it fails, no quota-bearing Tectly upload occurs.
     verifier = await replicate!.run({
       image: input.replicateImage,
       widthPx: input.sourceImage.widthPx,
@@ -199,8 +287,6 @@ export async function analyzeBaytiCore(
       title: `Bayti Core V2 — ${input.fileName}`,
     });
   } else if (replicate !== null) {
-    // Best-effort mode keeps latency low while preserving the primary result if the
-    // independent verifier fails after the paid Tectly analysis has started.
     const verifierPromise = replicate
       .run({
         image: input.replicateImage,
