@@ -153,6 +153,64 @@ function scopeVerifierToPrimary(
   };
 }
 
+const GENERIC_ROOM_LABELS = new Set([
+  "",
+  "other",
+  "room",
+  "unknown",
+  "unclassified",
+  "غير معروف",
+  "اخرى",
+  "أخرى",
+]);
+
+function isGenericRoomLabel(label: string | null): boolean {
+  return GENERIC_ROOM_LABELS.has((label ?? "").trim().toLocaleLowerCase("en-US"));
+}
+
+/**
+ * Replicate's kitchen segmentation is semantic evidence, not authoritative room geometry.
+ * Use it only to enrich a generic Tectly room when the contour sits strongly inside one
+ * and only one room. Existing meaningful provider labels are never overwritten, and
+ * ambiguous contours remain ignored rather than guessed.
+ */
+function enrichGenericKitchenRooms(
+  primary: CanonicalPlan,
+  verifier: ReplicateVerifierResult,
+  widthPx: number,
+  heightPx: number,
+): { rooms: CanonicalPlan["rooms"]; enrichedCount: number; ambiguousCount: number } {
+  const kitchenRoomIds = new Set<string>();
+  let ambiguousCount = 0;
+
+  for (const contour of verifier.kitchenContours) {
+    const ranked = primary.rooms
+      .map((room) => ({
+        room,
+        // Direction matters: sample the semantic contour against the authoritative
+        // Tectly room polygon. Kitchen cabinetry/segmentation can cover only part of a room.
+        score: polygonSupportScore(contour, room.polygon, widthPx, heightPx),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    const best = ranked[0];
+    const second = ranked[1];
+    const secondScore = second?.score ?? 0;
+    if (best === undefined || best.score < 0.8 || secondScore > 0.4 || best.score - secondScore < 0.35) {
+      ambiguousCount += 1;
+      continue;
+    }
+
+    if (isGenericRoomLabel(best.room.label)) kitchenRoomIds.add(best.room.id);
+  }
+
+  const rooms = primary.rooms.map((room) =>
+    kitchenRoomIds.has(room.id) ? { ...room, label: "Kitchen" } : room,
+  );
+
+  return { rooms, enrichedCount: kitchenRoomIds.size, ambiguousCount };
+}
+
 /**
  * Tectly stays authoritative. Replicate can confirm, flag, or add a review candidate;
  * it never silently replaces a Tectly wall/opening geometry.
@@ -171,6 +229,13 @@ export function fuseTectlyWithReplicate(
   if (scoped.removedEvidenceCount > 0) {
     notes.push(
       `Ignored ${scoped.removedEvidenceCount} verifier detections outside this plan's geometry bounds.`,
+    );
+  }
+
+  const roomSemantics = enrichGenericKitchenRooms(primary, secondaryVerifier, widthPx, heightPx);
+  if (secondaryVerifier.kitchenContours.length > 0) {
+    notes.push(
+      `Replicate room semantics: ${roomSemantics.enrichedCount} generic room(s) labelled Kitchen from unambiguous kitchen segmentation; ${roomSemantics.ambiguousCount} ambiguous kitchen contour(s) were ignored.`,
     );
   }
 
@@ -328,6 +393,7 @@ export function fuseTectlyWithReplicate(
     ...primary,
     walls,
     openings,
+    rooms: roomSemantics.rooms,
     reviewCandidates,
     qa: { status, conflicts, notes },
   };
