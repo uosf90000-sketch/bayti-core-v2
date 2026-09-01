@@ -1,0 +1,53 @@
+{
+  "id": "observed-real-plan-001",
+  "kind": "canonical-observation",
+  "replayableProviderFixture": false,
+  "engineVersionObserved": "0.8.0",
+  "sourceImage": {
+    "widthPx": 2400,
+    "heightPx": 3322,
+    "mimeType": "image/jpeg"
+  },
+  "counts": {
+    "walls": 14,
+    "openings": 17,
+    "rooms": 27
+  },
+  "independentConfirmation": {
+    "wallsConfirmed": 11,
+    "wallsTotal": 14,
+    "wallConfirmationRate": 0.7857142857142857,
+    "openingsConfirmed": 13,
+    "openingsTotal": 17,
+    "openingConfirmationRate": 0.7647058823529411
+  },
+  "openingGeometry": {
+    "supportedOpenings": 15,
+    "supportedOpeningRate": 0.8823529411764706,
+    "physicallyMeasuredOpenings": 0
+  },
+  "review": {
+    "conflicts": 3,
+    "reviewCandidates": 22
+  },
+  "scale": {
+    "known": false,
+    "note": "The saved canonical observation predates manual scale calibration. Printed dimensions were visible on the source image, but no physical scale is injected into this observation."
+  },
+  "roomSemantics": {
+    "genericOtherLabels": 27,
+    "totalRooms": 27,
+    "note": "Every provider room label in this saved result was Other. This observation motivated conservative independent kitchen-semantic enrichment; other room types remain unknown unless supported by explicit evidence."
+  },
+  "privacy": {
+    "providerProjectIdsRetained": false,
+    "providerDocumentIdsRetained": false,
+    "providerRequestIdsRetained": false,
+    "sourceFileNameRetained": false
+  },
+  "notes": [
+    "This is a sanitized real Engine Lab observation, not a complete raw Tectly/Replicate replay fixture.",
+    "Use it as a historical regression baseline for catastrophic count/coverage drift only.",
+    "Do not infer provider accuracy thresholds from this single plan; the release corpus target remains 10–20 diverse real plans."
+  ]
+}
