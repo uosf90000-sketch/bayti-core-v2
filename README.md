@@ -21,7 +21,7 @@ Floor plan
 - Replicate never silently overwrites a Tectly wall.
 - A Replicate-only opening is a review candidate, not an accepted opening.
 - Complex Tectly wall polygons are preserved as wall footprints. V2 does **not** repeat the old Bayti mistake of collapsing a complex wall-chain polygon into one straight thick wall.
-- A derived wall line/arc remains `null` until it can be fitted safely.
+- A straight center line and thickness are derived only when the footprint is a thin, strongly rectangular bar. L-shaped, curved and otherwise complex footprints remain polygon-only.
 - All comparison happens in one full-page `0..1` coordinate system.
 - Replicate evidence is scoped to the current Tectly plan before fusion, so a second plan on the same PDF/image page cannot create false conflicts.
 - Provider disagreement remains visible in `qa`, `reviewCandidates` and per-element confidence.
@@ -47,6 +47,7 @@ The result exposes `verifierStatus`, `verifierMessage` and `replicateRequestId` 
 - Replicate pixel-output parser and normalization.
 - Tectly plan-local → full-page coordinate mapper.
 - Footprint-first canonical geometry schema.
+- Conservative straight-wall fitting with real thickness only when scale is known.
 - Spatial wall support matching.
 - Door/window center-line matching.
 - Entry-door enrichment only when the primary door geometry is independently confirmed.
@@ -56,6 +57,7 @@ The result exposes `verifierStatus`, `verifierMessage` and `replicateRequestId` 
 - Required-verifier mode that avoids starting a Tectly paid analysis when verification already failed.
 - QA status (`pass`, `review`, `blocked`) and confidence evidence.
 - Unit/regression tests and GitHub Actions CI.
+- Minimal authenticated HTTP service for Railway: `/health`, `/ready`, and `POST /v1/analyze`.
 
 ## Secure configuration
 
@@ -67,6 +69,7 @@ TECTLY_CLIENT_SECRET
 TECTLY_API_BASE_URL
 REPLICATE_API_TOKEN
 REPLICATE_FLOORPLAN_VERSION
+BAYTI_CORE_API_KEY
 ```
 
 Tectly defaults to the sandbox host. Production must be selected explicitly with `TECTLY_API_BASE_URL=https://platform.tectly.com/api/v1`.
@@ -75,4 +78,4 @@ Tectly defaults to the sandbox host. Production must be selected explicitly with
 
 TypeScript typecheck and the current core/fusion/mapping/parser regression tests pass in GitHub Actions.
 
-The remaining verification step is a **live same-plan run** with real Tectly and Replicate credentials configured securely. That run should be performed on the same reference floor plan already used to compare providers, then expanded into a 10–20 plan regression corpus before building the new Bayti UI/3D product around the core.
+The remaining provider verification step is a **live same-plan run** with real Tectly and Replicate credentials configured securely. That run should be performed on the same reference floor plan already used to compare providers, then expanded into a 10–20 plan regression corpus before building the new Bayti UI/3D product around the core.

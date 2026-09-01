@@ -14,6 +14,7 @@ import type {
   TectlyPoint,
 } from "./tectly-types.js";
 import { tectlyOpeningKind } from "./tectly-types.js";
+import { fitStraightWallFootprint } from "./wall-fit.js";
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -80,16 +81,21 @@ export function mapTectlyBundleToCanonical(
   sourceImage: SourceImageInfo,
 ): CanonicalPlan {
   const section = bundle.plan.pageSection;
+  const scale = scaleFromTectly(bundle, sourceImage);
+  let fittedWallCount = 0;
 
   const walls: CanonicalWall[] = bundle.walls.map((wall, index) => {
     const footprint = mapPolygon(wall.boundary, section);
+    const fit = fitStraightWallFootprint(footprint, sourceImage, scale);
+    if (fit !== null) fittedWallCount += 1;
+
     return {
       id: `wall-${index + 1}`,
       footprint,
-      // Critical V2 rule: a Tectly wall polygon may represent complex/curved wall area.
-      // Do not collapse it into a single axis. A safe path fitter can be added later.
-      geometry: null,
-      thicknessMeters: null,
+      // Critical V2 rule: wall polygons stay authoritative. A center line is derived
+      // only for a thin, strongly rectangular footprint; complex/curved chains remain null.
+      geometry: fit?.geometry ?? null,
+      thicknessMeters: fit?.thicknessMeters ?? null,
       confidence: {
         score: 0.8,
         agreement: "single-source",
@@ -134,11 +140,16 @@ export function mapTectlyBundleToCanonical(
   if (walls.length === 0) qaNotes.push("Tectly returned no walls.");
   if (rooms.length === 0) qaNotes.push("Tectly returned no rooms.");
   if (openings.length === 0) qaNotes.push("Tectly returned no wall openings.");
+  if (walls.length > 0) {
+    qaNotes.push(
+      `Safe straight-wall fitting: ${fittedWallCount}/${walls.length} wall footprints received derived center lines; complex footprints remain polygon-only.`,
+    );
+  }
 
   return {
     schemaVersion: "2.1",
     sourceImage,
-    scale: scaleFromTectly(bundle, sourceImage),
+    scale,
     walls,
     openings,
     rooms,
