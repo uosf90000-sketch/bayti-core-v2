@@ -1,4 +1,4 @@
-import type { NormalizedPoint2D, ProviderName } from "../domain/canonical";
+import type { NormalizedPoint2D, ProviderName } from "../domain/canonical.js";
 
 export interface ProviderRunMeta {
   provider: ProviderName;
@@ -22,6 +22,5 @@ export interface ReplicateVerifierResult {
 
 export interface TectlyPrimaryResult {
   meta: ProviderRunMeta & { provider: "tectly" };
-  /** Raw provider result is intentionally retained until the new mapper is proven on the corpus. */
   raw: unknown;
 }
