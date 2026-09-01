@@ -57,9 +57,11 @@ The result exposes `verifierStatus`, `verifierMessage` and `replicateRequestId` 
 - complex/polygon-only wall count
 - scale availability
 - conflicts and review candidates
+- runtime canonical-geometry validation errors/warnings
 
 The default PASS policy is intentionally conservative and currently requires:
 
+- valid non-degenerate canonical geometry
 - real wall geometry
 - room polygons
 - known physical scale on both axes
@@ -88,12 +90,14 @@ This contract is the guardrail that prevents the future renderer from recreating
 
 - `POST /v1/analyze` requires both the Bearer API key and a stable `Idempotency-Key` header.
 - Reusing the same key for different content returns HTTP `409`.
-- The engine writes an idempotency record **before** the provider operation starts.
-- With `BAYTI_CORE_IDEMPOTENCY_DIR` configured on a mounted persistent volume, `pending`, `fulfilled` and `rejected` analysis records survive a process/container restart.
-- A request found in durable `pending` state after restart is **not rerun automatically**; it returns a conflict so a possibly charged Tectly upload cannot be duplicated blindly.
+- The engine reserves an idempotency record **before** the provider operation starts.
+- Preferred production mode is `BAYTI_CORE_IDEMPOTENCY_DATABASE_URL`: a shared Postgres ledger with an atomic claim that allows only one process/replica to cross the paid-provider start boundary for a logical request.
+- `pending`, `fulfilled` and `rejected` records survive process/container restarts in Postgres.
+- An unexpired `pending` request is **not rerun automatically**; this prevents a possibly charged Tectly upload from being duplicated blindly after a crash or concurrent request.
 - Successful and failed outcomes are retained for the TTL and replayed/rejected without invoking providers again.
-- The built-in file ledger is intended for a single application replica. Multi-replica production should implement a transactional shared `IdempotencyStore` using a database or Redis.
-- Set `BAYTI_CORE_REQUIRE_PERSISTENT_IDEMPOTENCY=true` to make `/ready` return `503` unless persistent file-backed idempotency is configured and writable.
+- `BAYTI_CORE_IDEMPOTENCY_DIR` remains available as a restart-safe single-replica fallback when a persistent volume is mounted.
+- Memory mode is development-only protection and does not survive a restart.
+- Set `BAYTI_CORE_REQUIRE_PERSISTENT_IDEMPOTENCY=true` to make `/ready` return `503` unless a persistent Postgres/file ledger is configured and writable.
 - Provider failure details stay in server logs. HTTP callers receive a generic error plus `x-request-id` for correlation.
 
 ## Implemented
@@ -105,8 +109,10 @@ This contract is the guardrail that prevents the future renderer from recreating
 - Replicate pixel-output parser and normalization.
 - Tectly plan-local → full-page coordinate mapper.
 - Footprint-first canonical geometry schema.
+- Runtime canonical geometry validation before product/render consumption.
 - Conservative straight-wall fitting with real thickness only when scale is known.
 - Conservative opening host-wall inference and physical opening width derivation.
+- Room square metres derived only from canonical polygon + trusted physical scale; raw provider area is not mislabeled as m².
 - Spatial wall support matching.
 - Door/window center-line matching.
 - Entry-door enrichment only when the primary door geometry is independently confirmed.
@@ -115,10 +121,11 @@ This contract is the guardrail that prevents the future renderer from recreating
 - Best-effort verifier outage fallback without losing the primary result.
 - Required-verifier mode that avoids starting a Tectly paid analysis when verification already failed.
 - Fusion QA plus independent conservative product quality reporting.
-- Stable future 3D/render geometry contract.
-- Restart-safe single-replica paid-analysis idempotency ledger.
+- Stable future 3D/render geometry contract returned alongside diagnostic canonical plans.
+- Shared Postgres paid-analysis idempotency with an atomic cross-replica claim.
+- Persistent-volume file ledger fallback for one-replica deployments.
 - Per-plan regression expectation evaluator for the real corpus.
-- Unit/regression tests and GitHub Actions CI.
+- Unit/regression tests plus a real PostgreSQL integration test in GitHub Actions CI.
 - Authenticated Railway HTTP service: `/health`, `/ready`, and `POST /v1/analyze`.
 
 ## Secure configuration
@@ -133,6 +140,7 @@ REPLICATE_API_TOKEN
 REPLICATE_FLOORPLAN_VERSION
 BAYTI_CORE_API_KEY
 BAYTI_CORE_IDEMPOTENCY_TTL_MS
+BAYTI_CORE_IDEMPOTENCY_DATABASE_URL
 BAYTI_CORE_IDEMPOTENCY_DIR
 BAYTI_CORE_REQUIRE_PERSISTENT_IDEMPOTENCY
 BAYTI_CORE_MAX_BODY_BYTES
@@ -146,8 +154,8 @@ See `docs/REGRESSION_CORPUS.md`.
 
 A previous real Bayti reference plan (IMG_4679) produced roughly 74 walls / 12 openings / 27 rooms from Tectly. The old independent-reader run matched only 3 of the 12 provider openings, which is exactly why proximity-style 50% PASS logic must not be treated as a production accuracy threshold. The historical reader wall fixture was later documented as truncated and must not be used for calibration.
 
-The final engine validation step is to copy complete sanitized provider evidence for that reference and additional real plans into this repository, then run the current mapper/fusion/quality/regression pipeline across 10–20 plans.
+The final external validation step is to retain complete sanitized provider evidence for that reference and additional real plans, then run the current mapper/fusion/quality/regression pipeline across 10–20 plans. That corpus validates provider accuracy; it is separate from the engine safety/consistency tests.
 
 ## Current version
 
-`0.5.0`
+`0.6.0`
