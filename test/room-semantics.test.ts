@@ -20,7 +20,7 @@ function verifier(kitchenContours: ReplicateVerifierResult["kitchenContours"]): 
 }
 
 function plan(labels: Array<string | null>) {
-  const rooms = labels.map((label, index) => {
+  const rooms: TectlyPlanBundle["rooms"] = labels.map((label, index) => {
     const left = 0.05 + index * 0.45;
     const right = left + 0.4;
     return {
