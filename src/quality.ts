@@ -154,8 +154,16 @@ export function assessGeometryQuality(
   if (!policy.allowReviewCandidatesForPass && metrics.reviewCandidateCount > 0) {
     reviewReasons.push(`${metrics.reviewCandidateCount} secondary detection(s) still require review.`);
   }
+
+  // `qa.status` belongs to the source/fusion stage and may predate a local deterministic
+  // repair such as manual scale calibration or wall-support refresh. Concrete current
+  // blockers above remain authoritative. If the old stage was blocked but no current
+  // blocker survives, keep the plan in REVIEW rather than inheriting a stale permanent
+  // BLOCKED or jumping directly to PASS.
   if (plan.qa.status === "blocked" && blockers.length === 0) {
-    blockers.push("The provider/fusion QA gate marked this plan as blocked.");
+    reviewReasons.push(
+      "The source/fusion stage was previously blocked; current canonical geometry has no concrete blocker, so the repaired result requires review.",
+    );
   }
 
   const status: GeometryQualityReport["status"] =
