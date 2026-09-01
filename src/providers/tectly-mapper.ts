@@ -77,6 +77,26 @@ function scaleFromTectly(bundle: TectlyPlanBundle, source: SourceImageInfo): Pla
   };
 }
 
+function polygonAreaSquareMeters(points: NormalizedPoint2D[], scale: PlanScale): number | null {
+  const sx = scale.metersPerNormalizedX;
+  const sy = scale.metersPerNormalizedY;
+  if (sx === null || sy === null || sx <= 0 || sy <= 0 || points.length < 3) return null;
+
+  let twiceArea = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    if (!current || !next) continue;
+    const x1 = current.x * sx;
+    const y1 = current.y * sy;
+    const x2 = next.x * sx;
+    const y2 = next.y * sy;
+    twiceArea += x1 * y2 - x2 * y1;
+  }
+  const area = Math.abs(twiceArea) / 2;
+  return Number.isFinite(area) && area > 0 ? area : null;
+}
+
 export function mapTectlyBundleToCanonical(
   bundle: TectlyPlanBundle,
   sourceImage: SourceImageInfo,
@@ -134,17 +154,27 @@ export function mapTectlyBundleToCanonical(
     };
   });
 
-  const rooms: CanonicalRoom[] = bundle.rooms.map((room, index) => ({
-    id: `room-${index + 1}`,
-    label: room.caption ?? room.type ?? null,
-    polygon: mapPolygon(room.boundary, section),
-    areaSquareMeters: Number.isFinite(room.area) ? room.area : null,
-    confidence: {
-      score: 0.85,
-      agreement: "single-source",
-      evidence: [{ provider: "tectly", providerElementId: room.id, confidence: 0.85 }],
-    },
-  }));
+  let measuredRoomCount = 0;
+  const rooms: CanonicalRoom[] = bundle.rooms.map((room, index) => {
+    const polygon = mapPolygon(room.boundary, section);
+    const areaSquareMeters = polygonAreaSquareMeters(polygon, scale);
+    if (areaSquareMeters !== null) measuredRoomCount += 1;
+
+    return {
+      id: `room-${index + 1}`,
+      label: room.caption ?? room.type ?? null,
+      polygon,
+      // Tectly can expose a numeric `area` even when scale processing failed. That value
+      // is not safe to label as square metres. Canonical m² is therefore derived only
+      // from the mapped polygon and trusted physical X/Y scale.
+      areaSquareMeters,
+      confidence: {
+        score: 0.85,
+        agreement: "single-source",
+        evidence: [{ provider: "tectly", providerElementId: room.id, confidence: 0.85 }],
+      },
+    };
+  });
 
   const qaNotes: string[] = [];
   if (walls.length === 0) qaNotes.push("Tectly returned no walls.");
@@ -158,6 +188,11 @@ export function mapTectlyBundleToCanonical(
   if (openings.length > 0) {
     qaNotes.push(
       `Opening geometry: ${hostedOpeningCount}/${openings.length} openings received an unambiguous host wall; ${measuredOpeningCount}/${openings.length} received a physical width.`,
+    );
+  }
+  if (rooms.length > 0) {
+    qaNotes.push(
+      `Room geometry: ${measuredRoomCount}/${rooms.length} rooms received an area derived from canonical physical scale.`,
     );
   }
 
