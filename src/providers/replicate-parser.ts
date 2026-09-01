@@ -1,5 +1,5 @@
-import type { NormalizedPoint2D } from "../domain/canonical";
-import type { ReplicateVerifierResult } from "./types";
+import type { NormalizedPoint2D } from "../domain/canonical.js";
+import type { ReplicateVerifierResult } from "./types.js";
 
 type PixelPoint = [number, number];
 type PixelLine = [PixelPoint, PixelPoint];
