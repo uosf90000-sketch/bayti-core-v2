@@ -67,7 +67,7 @@ describe("mapTectlyBundleToCanonical", () => {
     expect(plan.openings[0]?.hostWallId).toBe("wall-1");
     expect(plan.openings[0]?.widthMeters).toBeCloseTo(2);
     expect(plan.openings[0]?.connectedRoomIds).toEqual(["room-1"]);
-    expect(plan.openings[0]?.connectsToExterior).toBe(true);
+    expect(plan.openings[0]?.connectsToExterior).toBeNull();
     expect(plan.rooms[0]?.areaSquareMeters).toBeCloseTo(45);
     expect(plan.scale.metersPerNormalizedX).toBeCloseTo(20);
     expect(plan.scale.metersPerNormalizedY).toBeCloseTo(12.5);
