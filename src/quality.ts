@@ -77,7 +77,10 @@ export function assessGeometryQuality(
   const complexWallCount = plan.walls.filter((wall) => wall.geometry === null).length;
   const hasKnownScale =
     plan.scale.source !== "unknown" &&
-    (plan.scale.metersPerNormalizedX !== null || plan.scale.metersPerNormalizedY !== null);
+    plan.scale.metersPerNormalizedX !== null &&
+    plan.scale.metersPerNormalizedX > 0 &&
+    plan.scale.metersPerNormalizedY !== null &&
+    plan.scale.metersPerNormalizedY > 0;
 
   const metrics: GeometryQualityMetrics = {
     wallCount: plan.walls.length,
@@ -105,7 +108,7 @@ export function assessGeometryQuality(
     blockers.push("No room polygons are available for room-level design.");
   }
   if (policy.requireKnownScale && !hasKnownScale) {
-    blockers.push("Real-world scale is unknown.");
+    blockers.push("Complete real-world X/Y scale is unknown.");
   }
 
   if (metrics.wallConfirmationRate < policy.minWallConfirmationRate) {
