@@ -71,9 +71,8 @@ export interface CanonicalOpening {
   /** Canonical room ids explicitly associated with the opening by the primary provider. */
   connectedRoomIds: string[];
   /**
-   * true only when provider topology identifies exactly one known room; false when it
-   * identifies two or more known rooms; null when provider topology is absent/ambiguous.
-   * Core never guesses exterior connectivity from proximity alone.
+   * Exterior connectivity is evidence-only. `null` means no provider/verifier explicitly
+   * established it. Core never infers exterior merely because one room id was returned.
    */
   connectsToExterior: boolean | null;
   confidence: ElementConfidence;
