@@ -26,6 +26,7 @@ const bundle: TectlyPlanBundle = {
       caption: "Living",
       type: "LivingRoom",
       boundary: [[0, 0.1], [1, 0.1], [1, 1], [0, 1]],
+      // Deliberately inconsistent with polygon+scale. Core must not trust this as m².
       area: 20,
     },
   ],
@@ -44,7 +45,7 @@ const bundle: TectlyPlanBundle = {
 };
 
 describe("mapTectlyBundleToCanonical", () => {
-  it("maps coordinates, fits simple walls, and hosts an unambiguous opening", () => {
+  it("maps coordinates, physical areas, fits simple walls, and hosts an unambiguous opening", () => {
     const plan = mapTectlyBundleToCanonical(bundle, {
       widthPx: 1000,
       heightPx: 500,
@@ -64,10 +65,32 @@ describe("mapTectlyBundleToCanonical", () => {
     expect(plan.openings[0]?.centerLine.start.y).toBeCloseTo(0.24);
     expect(plan.openings[0]?.hostWallId).toBe("wall-1");
     expect(plan.openings[0]?.widthMeters).toBeCloseTo(2);
+    expect(plan.rooms[0]?.areaSquareMeters).toBeCloseTo(45);
     expect(plan.scale.metersPerNormalizedX).toBeCloseTo(20);
     expect(plan.scale.metersPerNormalizedY).toBeCloseTo(12.5);
     expect(plan.scale.metersPerPixelX).toBeCloseTo(0.02);
     expect(plan.scale.metersPerPixelY).toBeCloseTo(0.025);
     expect(plan.qa.notes.some((note) => note.includes("1/1"))).toBe(true);
+  });
+
+  it("does not label provider area as square metres when physical scale is unavailable", () => {
+    const noScale: TectlyPlanBundle = {
+      ...bundle,
+      plan: {
+        ...bundle.plan,
+        horizontalScaleProcessingStatus: "Negative",
+      },
+      floor: { id: "floor-1" },
+    };
+
+    const plan = mapTectlyBundleToCanonical(noScale, {
+      widthPx: 1000,
+      heightPx: 500,
+      mimeType: "image/jpeg",
+    });
+
+    expect(plan.scale.source).toBe("unknown");
+    expect(plan.rooms[0]?.areaSquareMeters).toBeNull();
+    expect(plan.openings[0]?.widthMeters).toBeNull();
   });
 });
