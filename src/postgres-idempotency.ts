@@ -16,6 +16,7 @@ interface StoredRow {
 }
 
 const TABLE = "bayti_core_idempotency";
+const SCHEMA_LOCK_NAME = "bayti_core_idempotency_schema_v1";
 
 function keyHash(key: string): string {
   return createHash("sha256").update(key).digest("hex");
@@ -72,20 +73,38 @@ export class PostgresIdempotencyStore<T> implements IdempotencyStore<T> {
   private async initialize(): Promise<void> {
     if (this.initialization === null) {
       this.initialization = (async () => {
-        await this.pool.query(`
-          CREATE TABLE IF NOT EXISTS ${TABLE} (
-            key_hash TEXT PRIMARY KEY,
-            fingerprint TEXT NOT NULL,
-            state TEXT NOT NULL CHECK (state IN ('pending', 'fulfilled', 'rejected')),
-            expires_at_ms BIGINT NOT NULL,
-            created_at_ms BIGINT NOT NULL,
-            value_json JSONB,
-            error_message TEXT
-          )
-        `);
-        await this.pool.query(
-          `CREATE INDEX IF NOT EXISTS ${TABLE}_expires_idx ON ${TABLE} (expires_at_ms)`,
-        );
+        // CREATE TABLE IF NOT EXISTS can still race at the PostgreSQL catalog level when
+        // two fresh application replicas create the same relation simultaneously. Use a
+        // transaction-scoped advisory lock so first-start schema creation is serialized.
+        const client = await this.pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [SCHEMA_LOCK_NAME]);
+          await client.query(`
+            CREATE TABLE IF NOT EXISTS ${TABLE} (
+              key_hash TEXT PRIMARY KEY,
+              fingerprint TEXT NOT NULL,
+              state TEXT NOT NULL CHECK (state IN ('pending', 'fulfilled', 'rejected')),
+              expires_at_ms BIGINT NOT NULL,
+              created_at_ms BIGINT NOT NULL,
+              value_json JSONB,
+              error_message TEXT
+            )
+          `);
+          await client.query(
+            `CREATE INDEX IF NOT EXISTS ${TABLE}_expires_idx ON ${TABLE} (expires_at_ms)`,
+          );
+          await client.query("COMMIT");
+        } catch (error) {
+          try {
+            await client.query("ROLLBACK");
+          } catch {
+            // Preserve the original initialization error.
+          }
+          throw error;
+        } finally {
+          client.release();
+        }
       })();
     }
     await this.initialization;
