@@ -81,11 +81,13 @@ export function buildBaytiRenderContract(
   const unresolvedOpenings: UnresolvedRenderOpening[] = [];
 
   for (const opening of plan.openings) {
+    const hostWallId = opening.hostWallId;
+    const widthMeters = opening.widthMeters;
     const reasons: UnresolvedRenderOpening["reasons"] = [];
-    if (opening.hostWallId === null) reasons.push("missing-host-wall");
-    if (opening.widthMeters === null) reasons.push("missing-physical-width");
+    if (hostWallId === null) reasons.push("missing-host-wall");
+    if (widthMeters === null) reasons.push("missing-physical-width");
 
-    if (reasons.length > 0) {
+    if (reasons.length > 0 || hostWallId === null || widthMeters === null) {
       unresolvedOpenings.push({
         id: opening.id,
         kind: opening.kind,
@@ -98,9 +100,9 @@ export function buildBaytiRenderContract(
     openings.push({
       id: opening.id,
       kind: opening.kind,
-      hostWallId: opening.hostWallId,
+      hostWallId,
       centerLine: opening.centerLine,
-      widthMeters: opening.widthMeters,
+      widthMeters,
       confidence: opening.confidence.score,
     });
   }
