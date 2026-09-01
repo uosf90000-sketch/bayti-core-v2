@@ -60,8 +60,13 @@ export interface CanonicalOpening {
     start: NormalizedPoint2D;
     end: NormalizedPoint2D;
   };
-  /** Tectly does not currently expose a wall host directly, so V2 never invents one. */
+  /**
+   * Tectly does not expose a wall host directly. Bayti may fill this only when the
+   * opening line is geometrically supported by one wall footprint unambiguously;
+   * junction/tie cases stay null rather than being guessed.
+   */
   hostWallId: string | null;
+  /** Physical line width derived only when both canonical physical axes are known. */
   widthMeters: number | null;
   confidence: ElementConfidence;
 }
