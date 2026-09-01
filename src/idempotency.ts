@@ -29,12 +29,28 @@ export type PersistedIdempotencyEntry<T> =
       errorMessage: string;
     };
 
+export type IdempotencyStoreMode = "memory" | "file" | "postgres";
+
+export type IdempotencyClaimResult<T> =
+  | { claimed: true }
+  | { claimed: false; entry: PersistedIdempotencyEntry<T> };
+
 export interface IdempotencyStore<T> {
-  readonly mode: "memory" | "file";
+  readonly mode: IdempotencyStoreMode;
   get(key: string): Promise<PersistedIdempotencyEntry<T> | null>;
   set(key: string, entry: PersistedIdempotencyEntry<T>): Promise<void>;
   delete(key: string): Promise<void>;
+  /**
+   * Optional cross-process atomic claim. Shared stores should implement this so only
+   * one replica can create/replace an expired pending record for a logical request.
+   */
+  claim?(
+    key: string,
+    fingerprint: string,
+    pending: Extract<PersistedIdempotencyEntry<T>, { state: "pending" }>,
+  ): Promise<IdempotencyClaimResult<T>>;
   probe?(): Promise<void>;
+  close?(): Promise<void>;
 }
 
 function errorMessage(error: unknown): string {
@@ -64,7 +80,7 @@ export class MemoryIdempotencyStore<T> implements IdempotencyStore<T> {
  *
  * The atomic temp-file + rename write protects against partial JSON records. This store
  * intentionally targets one application replica. Multi-replica deployments should use
- * a transactional shared ledger (database/Redis) behind the same IdempotencyStore contract.
+ * a shared store with atomic `claim`, such as Postgres.
  */
 export class FileIdempotencyStore<T> implements IdempotencyStore<T> {
   readonly mode = "file" as const;
@@ -124,12 +140,9 @@ interface InFlightEntry<T> {
  * Guard against accidental duplicate paid analyses.
  *
  * The in-process reservation is installed synchronously before any persistent-store
- * await, so two simultaneous HTTP requests with the same key cannot both cross the
- * start boundary. A durable `pending` record is then written before the provider
- * operation starts. If the process crashes after a quota-bearing upload, a restart sees
- * the pending record and refuses to run the same key again instead of risking a second
- * charge. Successful and failed outcomes are retained for the TTL. An intentional retry
- * must use a new key.
+ * await. Shared stores can additionally implement atomic `claim`, which closes the same
+ * race across multiple application replicas. A durable pending record exists before the
+ * quota-bearing provider operation starts; interrupted requests are never blindly rerun.
  */
 export class IdempotencyRegistry<T> {
   private readonly inFlight = new Map<string, InFlightEntry<T>>();
@@ -144,12 +157,16 @@ export class IdempotencyRegistry<T> {
     }
   }
 
-  get mode(): IdempotencyStore<T>["mode"] {
+  get mode(): IdempotencyStoreMode {
     return this.store.mode;
   }
 
   async probe(): Promise<void> {
     await this.store.probe?.();
+  }
+
+  async close(): Promise<void> {
+    await this.store.close?.();
   }
 
   private async existing(key: string): Promise<PersistedIdempotencyEntry<T> | null> {
@@ -162,33 +179,44 @@ export class IdempotencyRegistry<T> {
     return entry;
   }
 
+  private replayOrThrow(
+    fingerprint: string,
+    persisted: PersistedIdempotencyEntry<T>,
+  ): IdempotentRunResult<T> {
+    if (persisted.fingerprint !== fingerprint) {
+      throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST");
+    }
+    if (persisted.state === "fulfilled") {
+      return { value: persisted.value, replayed: true };
+    }
+    if (persisted.state === "rejected") {
+      throw new Error(persisted.errorMessage);
+    }
+    throw new Error("IDEMPOTENCY_REQUEST_IN_PROGRESS_OR_INTERRUPTED");
+  }
+
   private async execute(
     key: string,
     fingerprint: string,
     operation: () => Promise<T>,
   ): Promise<IdempotentRunResult<T>> {
-    const persisted = await this.existing(key);
-    if (persisted !== null) {
-      if (persisted.fingerprint !== fingerprint) {
-        throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST");
-      }
-      if (persisted.state === "fulfilled") {
-        return { value: persisted.value, replayed: true };
-      }
-      if (persisted.state === "rejected") {
-        throw new Error(persisted.errorMessage);
-      }
-      throw new Error("IDEMPOTENCY_REQUEST_IN_PROGRESS_OR_INTERRUPTED");
-    }
-
     const createdAtMs = this.now();
     const expiresAtMs = createdAtMs + this.ttlMs;
-    await this.store.set(key, {
+    const pending: Extract<PersistedIdempotencyEntry<T>, { state: "pending" }> = {
       fingerprint,
       state: "pending",
       createdAtMs,
       expiresAtMs,
-    });
+    };
+
+    if (this.store.claim !== undefined) {
+      const claim = await this.store.claim(key, fingerprint, pending);
+      if (!claim.claimed) return this.replayOrThrow(fingerprint, claim.entry);
+    } else {
+      const persisted = await this.existing(key);
+      if (persisted !== null) return this.replayOrThrow(fingerprint, persisted);
+      await this.store.set(key, pending);
+    }
 
     try {
       const value = await operation();
@@ -226,7 +254,6 @@ export class IdempotencyRegistry<T> {
       return { value: result.value, replayed: true };
     }
 
-    // Reserve synchronously, before execute() can yield on store access.
     const promise = this.execute(key, fingerprint, operation);
     this.inFlight.set(key, { fingerprint, promise });
 
