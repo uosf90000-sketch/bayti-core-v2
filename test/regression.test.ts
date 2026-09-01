@@ -4,7 +4,7 @@ import { evaluateRegressionPlan } from "../src/regression.js";
 
 function plan(): CanonicalPlan {
   return {
-    schemaVersion: "2.1",
+    schemaVersion: "2.2",
     sourceImage: { widthPx: 1200, heightPx: 1600, mimeType: "image/jpeg" },
     scale: {
       metersPerPixelX: 0.01,
@@ -37,6 +37,8 @@ function plan(): CanonicalPlan {
         centerLine: { start: { x: 0.2, y: 0.1 }, end: { x: 0.3, y: 0.1 } },
         hostWallId: "wall-0",
         widthMeters: 1.2,
+        connectedRoomIds: ["room-1"],
+        connectsToExterior: null,
         confidence: {
           score: 0.96,
           agreement: "confirmed",

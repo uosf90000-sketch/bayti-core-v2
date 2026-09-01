@@ -105,6 +105,10 @@ export function mapTectlyBundleToCanonical(
   const scale = scaleFromTectly(bundle, sourceImage);
   let fittedWallCount = 0;
 
+  const roomIdMap = new Map<string, string>(
+    bundle.rooms.map((room, index) => [room.id, `room-${index + 1}`]),
+  );
+
   const walls: CanonicalWall[] = bundle.walls.map((wall, index) => {
     const footprint = mapPolygon(wall.boundary, section);
     const fit = fitStraightWallFootprint(footprint, sourceImage, scale);
@@ -127,6 +131,8 @@ export function mapTectlyBundleToCanonical(
 
   let hostedOpeningCount = 0;
   let measuredOpeningCount = 0;
+  let topologizedOpeningCount = 0;
+  let unknownTopologyReferenceCount = 0;
   const openings: CanonicalOpening[] = bundle.wallOpenings.map((opening, index) => {
     const [a, b] = openingLine(opening.details);
     const kind = tectlyOpeningKind(opening.details);
@@ -136,6 +142,17 @@ export function mapTectlyBundleToCanonical(
     };
     const hostWallId = inferOpeningHostWallId(centerLine, walls, sourceImage);
     const widthMeters = openingWidthMeters(centerLine, scale);
+    const connectedRoomIds: string[] = [];
+    for (const providerRoomId of opening.rooms) {
+      const canonicalRoomId = roomIdMap.get(providerRoomId);
+      if (canonicalRoomId !== undefined && !connectedRoomIds.includes(canonicalRoomId)) {
+        connectedRoomIds.push(canonicalRoomId);
+      }
+    }
+    const unknownRoomRefs = opening.rooms.length - connectedRoomIds.length;
+    if (unknownRoomRefs > 0) unknownTopologyReferenceCount += unknownRoomRefs;
+    if (connectedRoomIds.length > 0) topologizedOpeningCount += 1;
+
     if (hostWallId !== null) hostedOpeningCount += 1;
     if (widthMeters !== null) measuredOpeningCount += 1;
 
@@ -146,6 +163,9 @@ export function mapTectlyBundleToCanonical(
       // This is geometric inference, not a provider claim. Ambiguous junctions remain null.
       hostWallId,
       widthMeters,
+      connectedRoomIds,
+      // Tectly's room-id list is preserved, but Core does not equate "one room" with exterior.
+      connectsToExterior: null,
       confidence: {
         score: 0.82,
         agreement: "single-source",
@@ -189,6 +209,14 @@ export function mapTectlyBundleToCanonical(
     qaNotes.push(
       `Opening geometry: ${hostedOpeningCount}/${openings.length} openings received an unambiguous host wall; ${measuredOpeningCount}/${openings.length} received a physical width.`,
     );
+    qaNotes.push(
+      `Opening topology: ${topologizedOpeningCount}/${openings.length} openings include provider-backed room connectivity; exterior connectivity remains unknown unless explicit evidence exists.`,
+    );
+    if (unknownTopologyReferenceCount > 0) {
+      qaNotes.push(
+        `Opening topology warning: ${unknownTopologyReferenceCount} provider room reference(s) did not resolve to a room in the current plan.`,
+      );
+    }
   }
   if (rooms.length > 0) {
     qaNotes.push(
@@ -197,7 +225,7 @@ export function mapTectlyBundleToCanonical(
   }
 
   return {
-    schemaVersion: "2.1",
+    schemaVersion: "2.2",
     sourceImage,
     scale,
     walls,

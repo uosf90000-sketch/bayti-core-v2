@@ -45,13 +45,14 @@ const bundle: TectlyPlanBundle = {
 };
 
 describe("mapTectlyBundleToCanonical", () => {
-  it("maps coordinates, physical areas, fits simple walls, and hosts an unambiguous opening", () => {
+  it("maps coordinates, physical areas, topology, fits simple walls, and hosts an unambiguous opening", () => {
     const plan = mapTectlyBundleToCanonical(bundle, {
       widthPx: 1000,
       heightPx: 500,
       mimeType: "image/jpeg",
     });
 
+    expect(plan.schemaVersion).toBe("2.2");
     expect(plan.walls[0]?.footprint[0]).toEqual({ x: 0.1, y: 0.2 });
     expect(plan.walls[0]?.footprint[1]).toEqual({ x: 0.6, y: 0.2 });
     expect(plan.walls[0]?.geometry?.type).toBe("line");
@@ -65,6 +66,8 @@ describe("mapTectlyBundleToCanonical", () => {
     expect(plan.openings[0]?.centerLine.start.y).toBeCloseTo(0.24);
     expect(plan.openings[0]?.hostWallId).toBe("wall-1");
     expect(plan.openings[0]?.widthMeters).toBeCloseTo(2);
+    expect(plan.openings[0]?.connectedRoomIds).toEqual(["room-1"]);
+    expect(plan.openings[0]?.connectsToExterior).toBeNull();
     expect(plan.rooms[0]?.areaSquareMeters).toBeCloseTo(45);
     expect(plan.scale.metersPerNormalizedX).toBeCloseTo(20);
     expect(plan.scale.metersPerNormalizedY).toBeCloseTo(12.5);
@@ -92,5 +95,21 @@ describe("mapTectlyBundleToCanonical", () => {
     expect(plan.scale.source).toBe("unknown");
     expect(plan.rooms[0]?.areaSquareMeters).toBeNull();
     expect(plan.openings[0]?.widthMeters).toBeNull();
+  });
+
+  it("keeps missing provider topology unknown instead of guessing room connectivity", () => {
+    const noTopology: TectlyPlanBundle = {
+      ...bundle,
+      wallOpenings: bundle.wallOpenings.map((opening) => ({ ...opening, rooms: [] })),
+    };
+
+    const plan = mapTectlyBundleToCanonical(noTopology, {
+      widthPx: 1000,
+      heightPx: 500,
+      mimeType: "image/jpeg",
+    });
+
+    expect(plan.openings[0]?.connectedRoomIds).toEqual([]);
+    expect(plan.openings[0]?.connectsToExterior).toBeNull();
   });
 });

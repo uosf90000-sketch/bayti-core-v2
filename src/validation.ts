@@ -64,6 +64,7 @@ export function validateCanonicalPlan(plan: CanonicalPlan): CanonicalValidationR
   }
 
   const wallIds = new Set(plan.walls.map((wall) => wall.id));
+  const roomIds = new Set(plan.rooms.map((room) => room.id));
   for (const id of duplicateIds(plan.walls.map((wall) => wall.id))) {
     errors.push(`Duplicate wall id: ${id}.`);
   }
@@ -123,6 +124,23 @@ export function validateCanonicalPlan(plan: CanonicalPlan): CanonicalValidationR
     }
     if (opening.widthMeters !== null && (!Number.isFinite(opening.widthMeters) || opening.widthMeters <= 0)) {
       errors.push(`${opening.id} has a non-positive/invalid physical width.`);
+    }
+    for (const duplicate of duplicateIds(opening.connectedRoomIds)) {
+      errors.push(`${opening.id} contains duplicate connected room ${duplicate}.`);
+    }
+    for (const roomId of opening.connectedRoomIds) {
+      if (!roomIds.has(roomId)) {
+        errors.push(`${opening.id} references missing connected room ${roomId}.`);
+      }
+    }
+    if (opening.connectedRoomIds.length === 0 && opening.connectsToExterior !== null) {
+      errors.push(`${opening.id} declares exterior topology without any provider-backed room.`);
+    }
+    if (opening.connectedRoomIds.length === 1 && opening.connectsToExterior === false) {
+      warnings.push(`${opening.id} has one connected room but is marked non-exterior.`);
+    }
+    if (opening.connectedRoomIds.length >= 2 && opening.connectsToExterior === true) {
+      warnings.push(`${opening.id} has multiple connected rooms but is marked exterior.`);
     }
   }
 

@@ -68,6 +68,13 @@ export interface CanonicalOpening {
   hostWallId: string | null;
   /** Physical line width derived only when both canonical physical axes are known. */
   widthMeters: number | null;
+  /** Canonical room ids explicitly associated with the opening by the primary provider. */
+  connectedRoomIds: string[];
+  /**
+   * Exterior connectivity is evidence-only. `null` means no provider/verifier explicitly
+   * established it. Core never infers exterior merely because one room id was returned.
+   */
+  connectsToExterior: boolean | null;
   confidence: ElementConfidence;
 }
 
@@ -106,7 +113,7 @@ export interface ReviewCandidate {
 }
 
 export interface CanonicalPlan {
-  schemaVersion: "2.1";
+  schemaVersion: "2.2";
   sourceImage: SourceImageInfo;
   scale: PlanScale;
   walls: CanonicalWall[];
