@@ -117,16 +117,19 @@ export class FileIdempotencyStore<T> implements IdempotencyStore<T> {
 
 interface InFlightEntry<T> {
   fingerprint: string;
-  promise: Promise<T>;
+  promise: Promise<IdempotentRunResult<T>>;
 }
 
 /**
  * Guard against accidental duplicate paid analyses.
  *
- * A durable `pending` record is written before the provider operation starts. If the
- * process crashes after a quota-bearing upload, a restart sees the pending record and
- * refuses to run the same key again instead of risking a second charge. Successful and
- * failed outcomes are replayed for the TTL. An intentional retry must use a new key.
+ * The in-process reservation is installed synchronously before any persistent-store
+ * await, so two simultaneous HTTP requests with the same key cannot both cross the
+ * start boundary. A durable `pending` record is then written before the provider
+ * operation starts. If the process crashes after a quota-bearing upload, a restart sees
+ * the pending record and refuses to run the same key again instead of risking a second
+ * charge. Successful and failed outcomes are retained for the TTL. An intentional retry
+ * must use a new key.
  */
 export class IdempotencyRegistry<T> {
   private readonly inFlight = new Map<string, InFlightEntry<T>>();
@@ -159,19 +162,11 @@ export class IdempotencyRegistry<T> {
     return entry;
   }
 
-  async run(
+  private async execute(
     key: string,
     fingerprint: string,
     operation: () => Promise<T>,
   ): Promise<IdempotentRunResult<T>> {
-    const active = this.inFlight.get(key);
-    if (active !== undefined) {
-      if (active.fingerprint !== fingerprint) {
-        throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST");
-      }
-      return { value: await active.promise, replayed: true };
-    }
-
     const persisted = await this.existing(key);
     if (persisted !== null) {
       if (persisted.fingerprint !== fingerprint) {
@@ -195,11 +190,8 @@ export class IdempotencyRegistry<T> {
       expiresAtMs,
     });
 
-    const promise = operation();
-    this.inFlight.set(key, { fingerprint, promise });
-
     try {
-      const value = await promise;
+      const value = await operation();
       await this.store.set(key, {
         fingerprint,
         state: "fulfilled",
@@ -217,8 +209,32 @@ export class IdempotencyRegistry<T> {
         errorMessage: errorMessage(error),
       });
       throw error;
+    }
+  }
+
+  async run(
+    key: string,
+    fingerprint: string,
+    operation: () => Promise<T>,
+  ): Promise<IdempotentRunResult<T>> {
+    const active = this.inFlight.get(key);
+    if (active !== undefined) {
+      if (active.fingerprint !== fingerprint) {
+        throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST");
+      }
+      const result = await active.promise;
+      return { value: result.value, replayed: true };
+    }
+
+    // Reserve synchronously, before execute() can yield on store access.
+    const promise = this.execute(key, fingerprint, operation);
+    this.inFlight.set(key, { fingerprint, promise });
+
+    try {
+      return await promise;
     } finally {
-      this.inFlight.delete(key);
+      const current = this.inFlight.get(key);
+      if (current?.promise === promise) this.inFlight.delete(key);
     }
   }
 }
