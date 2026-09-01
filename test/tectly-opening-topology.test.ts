@@ -1,5 +1,4 @@
-import assert from "node:assert/strict";
-import test from "node:test";
+import { expect, test } from "vitest";
 import { mapTectlyBundleToCanonical } from "../src/providers/tectly-mapper.js";
 import type { TectlyPlanBundle } from "../src/providers/tectly-types.js";
 
@@ -60,9 +59,9 @@ test("missing Tectly opening.rooms leaves topology unknown instead of throwing",
   } as unknown as TectlyPlanBundle;
 
   const plan = mapTectlyBundleToCanonical(bundle, sourceImage);
-  assert.equal(plan.openings.length, 1);
-  assert.deepEqual(plan.openings[0]?.connectedRoomIds, []);
-  assert.ok(
+  expect(plan.openings).toHaveLength(1);
+  expect(plan.openings[0]?.connectedRoomIds).toEqual([]);
+  expect(
     plan.qa.notes.some((note) => note.includes("did not include a provider room-id list")),
-  );
+  ).toBe(true);
 });
