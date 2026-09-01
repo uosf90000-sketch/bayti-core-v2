@@ -6,7 +6,7 @@ import { mapTectlyBundleToCanonical } from "./providers/tectly-mapper.js";
 import type { ReplicateVerifierResult } from "./providers/types.js";
 import { buildBaytiRenderContract, type BaytiRenderContract } from "./render-contract.js";
 
-export const BAYTI_CORE_VERSION = "0.5.0" as const;
+export const BAYTI_CORE_VERSION = "0.6.0" as const;
 
 export type VerifierMode = "best-effort" | "required";
 export type VerifierStatus = "succeeded" | "skipped" | "failed";
