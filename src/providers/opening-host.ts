@@ -11,6 +11,18 @@ interface PixelPoint {
   y: number;
 }
 
+interface WallDistance {
+  wallId: string;
+  distance: number;
+}
+
+export interface OpeningWallSupport {
+  /** One logical footprint contains/supports the opening line clearly. */
+  hostWallId: string | null;
+  /** One or two authoritative wall-region footprints supporting the opening. */
+  supportingWallIds: string[];
+}
+
 function toPixel(point: NormalizedPoint2D, source: SourceImageInfo): PixelPoint {
   return { x: point.x * source.widthPx, y: point.y * source.heightPx };
 }
@@ -58,23 +70,50 @@ function pointPolygonDistance(point: PixelPoint, polygon: PixelPoint[]): number 
   return best;
 }
 
-/**
- * Tectly currently links openings to rooms, not directly to walls. Infer a host only
- * when the opening line is supported by one wall footprint clearly better than every
- * other candidate. Ambiguous corner/junction cases deliberately remain `null`.
- */
-export function inferOpeningHostWallId(
+function distancesToWalls(
+  point: PixelPoint,
+  walls: CanonicalWall[],
+  source: SourceImageInfo,
+): WallDistance[] {
+  return walls
+    .map((wall) => ({
+      wallId: wall.id,
+      distance: pointPolygonDistance(
+        point,
+        wall.footprint.map((candidate) => toPixel(candidate, source)),
+      ),
+    }))
+    .sort((a, b) => a.distance - b.distance);
+}
+
+function uniqueEndpointWall(
+  point: PixelPoint,
+  walls: CanonicalWall[],
+  source: SourceImageInfo,
+  tolerancePx: number,
+): string | null {
+  const ranked = distancesToWalls(point, walls, source);
+  const best = ranked[0];
+  if (!best || best.distance > tolerancePx) return null;
+
+  const runnerUp = ranked[1];
+  if (!runnerUp || runnerUp.distance > tolerancePx) return best.wallId;
+
+  // At an actual corner/junction, two regions can be equally close. Do not manufacture
+  // support there. Real opening endpoints normally land clearly on one side fragment.
+  const requiredSeparationPx = Math.max(2, tolerancePx * 0.2);
+  return runnerUp.distance - best.distance >= requiredSeparationPx ? best.wallId : null;
+}
+
+function legacySingleHost(
   line: CanonicalOpening["centerLine"],
   walls: CanonicalWall[],
   source: SourceImageInfo,
+  tolerancePx: number,
 ): string | null {
-  if (walls.length === 0 || source.widthPx <= 0 || source.heightPx <= 0) return null;
-
   const samples = [line.start, midpoint(line.start, line.end), line.end].map((point) =>
     toPixel(point, source),
   );
-  const diagonal = Math.hypot(source.widthPx, source.heightPx);
-  const tolerancePx = Math.max(6, diagonal * 0.006);
 
   const candidates = walls
     .map((wall) => {
@@ -91,13 +130,57 @@ export function inferOpeningHostWallId(
   if (!best) return null;
   const runnerUp = candidates[1];
   if (!runnerUp) return best.wallId;
-
   if (best.supported > runnerUp.supported) return best.wallId;
 
   const requiredSeparationPx = Math.max(3, tolerancePx * 0.25);
   return runnerUp.averageDistance - best.averageDistance >= requiredSeparationPx
     ? best.wallId
     : null;
+}
+
+/**
+ * Tectly polygon mode can split one logical wall run into separate solid regions at a
+ * door/window void. In that case the opening endpoints are supported by two different
+ * wall footprints, and forcing one `hostWallId` is geometrically wrong. Preserve both
+ * support ids while keeping `hostWallId` only for genuine single-footprint support.
+ */
+export function inferOpeningWallSupport(
+  line: CanonicalOpening["centerLine"],
+  walls: CanonicalWall[],
+  source: SourceImageInfo,
+): OpeningWallSupport {
+  if (walls.length === 0 || source.widthPx <= 0 || source.heightPx <= 0) {
+    return { hostWallId: null, supportingWallIds: [] };
+  }
+
+  const diagonal = Math.hypot(source.widthPx, source.heightPx);
+  const tolerancePx = Math.max(6, diagonal * 0.006);
+  const startWallId = uniqueEndpointWall(toPixel(line.start, source), walls, source, tolerancePx);
+  const endWallId = uniqueEndpointWall(toPixel(line.end, source), walls, source, tolerancePx);
+
+  if (startWallId !== null && endWallId !== null) {
+    if (startWallId === endWallId) {
+      return { hostWallId: startWallId, supportingWallIds: [startWallId] };
+    }
+    return { hostWallId: null, supportingWallIds: [startWallId, endWallId] };
+  }
+
+  // Preserve the old conservative behavior for openings lying along/inside one polygon,
+  // where one endpoint may not resolve uniquely but the line as a whole clearly does.
+  const hostWallId = legacySingleHost(line, walls, source, tolerancePx);
+  return {
+    hostWallId,
+    supportingWallIds: hostWallId === null ? [] : [hostWallId],
+  };
+}
+
+/** Backward-compatible convenience for consumers that still require one host wall. */
+export function inferOpeningHostWallId(
+  line: CanonicalOpening["centerLine"],
+  walls: CanonicalWall[],
+  source: SourceImageInfo,
+): string | null {
+  return inferOpeningWallSupport(line, walls, source).hostWallId;
 }
 
 export function openingWidthMeters(
