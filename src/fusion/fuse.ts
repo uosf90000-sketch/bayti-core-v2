@@ -1,0 +1,209 @@
+import type {
+  CanonicalOpening,
+  CanonicalPlan,
+  OpeningKind,
+  ReviewCandidate,
+} from "../domain/canonical.js";
+import type { ReplicateVerifierResult } from "../providers/types.js";
+import {
+  lineLengthNormalized,
+  lineMatchScore,
+  polygonSupportScore,
+} from "./spatial.js";
+
+interface SecondaryOpening {
+  id: string;
+  kind: OpeningKind;
+  line: [CanonicalOpening["centerLine"]["start"], CanonicalOpening["centerLine"]["end"]];
+}
+
+function verifierOpenings(verifier: ReplicateVerifierResult): SecondaryOpening[] {
+  const out: SecondaryOpening[] = [];
+  verifier.doorCenterLines.forEach((line, index) => {
+    out.push({ id: `replicate-door-${index + 1}`, kind: "door", line });
+  });
+  verifier.entryDoorCenterLines.forEach((line, index) => {
+    out.push({ id: `replicate-entry-door-${index + 1}`, kind: "entry-door", line });
+  });
+  verifier.windowCenterLines.forEach((line, index) => {
+    out.push({ id: `replicate-window-${index + 1}`, kind: "window", line });
+  });
+  return out;
+}
+
+function compatible(primary: OpeningKind, secondary: OpeningKind): boolean {
+  if (primary === "window") return secondary === "window";
+  return secondary === "door" || secondary === "entry-door";
+}
+
+/**
+ * Tectly stays authoritative. Replicate can confirm, flag, or add a review candidate;
+ * it never silently replaces a Tectly wall/opening geometry.
+ */
+export function fuseTectlyWithReplicate(
+  primary: CanonicalPlan,
+  verifier: ReplicateVerifierResult,
+): CanonicalPlan {
+  const { widthPx, heightPx } = primary.sourceImage;
+  const conflicts = [...primary.qa.conflicts];
+  const notes = [...primary.qa.notes];
+  const reviewCandidates: ReviewCandidate[] = [...primary.reviewCandidates];
+
+  let confirmedWalls = 0;
+  const walls = primary.walls.map((wall) => {
+    let bestScore = 0;
+    let bestIndex = -1;
+    verifier.wallContours.forEach((contour, index) => {
+      const score = polygonSupportScore(wall.footprint, contour, widthPx, heightPx);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = index;
+      }
+    });
+
+    if (bestScore < 0.55 || bestIndex < 0) return wall;
+    confirmedWalls += 1;
+    return {
+      ...wall,
+      confidence: {
+        score: Math.max(wall.confidence.score, 0.95),
+        agreement: "confirmed" as const,
+        evidence: [
+          ...wall.confidence.evidence,
+          {
+            provider: "replicate" as const,
+            providerElementId: `wall-contour-${bestIndex + 1}`,
+            confidence: Math.min(0.9, 0.6 + bestScore * 0.3),
+          },
+        ],
+      },
+    };
+  });
+
+  // Replicate wall contours are connected segmentation regions, not semantic walls.
+  // Only surface a contour when it supports no Tectly wall at all.
+  verifier.wallContours.forEach((contour, index) => {
+    const bestPrimary = primary.walls.reduce(
+      (best, wall) => Math.max(best, polygonSupportScore(wall.footprint, contour, widthPx, heightPx)),
+      0,
+    );
+    if (bestPrimary < 0.25) {
+      reviewCandidates.push({
+        id: `review-replicate-wall-${index + 1}`,
+        provider: "replicate",
+        kind: "wall",
+        reason: "Replicate detected a wall region that does not support any Tectly wall.",
+        centerLine: null,
+        contour,
+      });
+    }
+  });
+
+  const secondary = verifierOpenings(verifier);
+  const used = new Set<string>();
+  let confirmedOpenings = 0;
+
+  const openings = primary.openings.map((opening) => {
+    const primaryLine: SecondaryOpening["line"] = [opening.centerLine.start, opening.centerLine.end];
+    let best: SecondaryOpening | null = null;
+    let bestScore = 0;
+
+    for (const candidate of secondary) {
+      if (used.has(candidate.id) || !compatible(opening.kind, candidate.kind)) continue;
+      const score = lineMatchScore(primaryLine, candidate.line, widthPx, heightPx);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+
+    if (best === null || bestScore < 0.55) return opening;
+    used.add(best.id);
+    confirmedOpenings += 1;
+
+    return {
+      ...opening,
+      // Tectly confirms the opening geometry; Replicate may safely add the entry-door label.
+      kind: opening.kind === "door" && best.kind === "entry-door" ? "entry-door" : opening.kind,
+      confidence: {
+        score: Math.max(opening.confidence.score, 0.96),
+        agreement: "confirmed" as const,
+        evidence: [
+          ...opening.confidence.evidence,
+          {
+            provider: "replicate" as const,
+            providerElementId: best.id,
+            confidence: Math.min(0.92, 0.65 + bestScore * 0.3),
+          },
+        ],
+      },
+    };
+  });
+
+  for (const candidate of secondary) {
+    if (used.has(candidate.id)) continue;
+
+    let bestAnyScore = 0;
+    let bestAnyKind: OpeningKind | null = null;
+    for (const opening of primary.openings) {
+      const score = lineMatchScore(
+        [opening.centerLine.start, opening.centerLine.end],
+        candidate.line,
+        widthPx,
+        heightPx,
+      );
+      if (score > bestAnyScore) {
+        bestAnyScore = score;
+        bestAnyKind = opening.kind;
+      }
+    }
+
+    const tooLong = lineLengthNormalized(candidate.line, widthPx, heightPx) > 0.25;
+    const typeConflict = bestAnyScore >= 0.6 && bestAnyKind !== null && !compatible(bestAnyKind, candidate.kind);
+    if (typeConflict) {
+      conflicts.push(
+        `${candidate.id} overlaps a Tectly ${bestAnyKind} but Replicate classifies it as ${candidate.kind}.`,
+      );
+    }
+
+    reviewCandidates.push({
+      id: `review-${candidate.id}`,
+      provider: "replicate",
+      kind: candidate.kind,
+      reason: tooLong
+        ? "Replicate-only opening has an unusually long center line and is treated as suspicious."
+        : typeConflict
+          ? "Replicate and Tectly disagree on the opening type."
+          : "Replicate detected an opening that Tectly did not confirm.",
+      centerLine: { start: candidate.line[0], end: candidate.line[1] },
+      contour: null,
+    });
+  }
+
+  const wallConfirmationRate = walls.length === 0 ? 0 : confirmedWalls / walls.length;
+  const openingConfirmationRate = openings.length === 0 ? 1 : confirmedOpenings / openings.length;
+  notes.push(
+    `Replicate confirmation: ${confirmedWalls}/${walls.length} walls, ${confirmedOpenings}/${openings.length} openings.`,
+  );
+
+  let status: CanonicalPlan["qa"]["status"] = "review";
+  if (walls.length === 0) {
+    status = "blocked";
+  } else if (
+    reviewCandidates.length === 0 &&
+    conflicts.length === 0 &&
+    primary.scale.source !== "unknown" &&
+    wallConfirmationRate >= 0.5 &&
+    openingConfirmationRate >= 0.5
+  ) {
+    status = "pass";
+  }
+
+  return {
+    ...primary,
+    walls,
+    openings,
+    reviewCandidates,
+    qa: { status, conflicts, notes },
+  };
+}
