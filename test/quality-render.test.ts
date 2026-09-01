@@ -45,6 +45,7 @@ function plan(): CanonicalPlan {
         kind: "door",
         centerLine: { start: { x: 0.25, y: 0.1 }, end: { x: 0.35, y: 0.1 } },
         hostWallId: "wall-1",
+        supportingWallIds: ["wall-1"],
         widthMeters: 1,
         connectedRoomIds: ["room-1"],
         connectsToExterior: true,
@@ -86,6 +87,7 @@ describe("geometry quality and render contract", () => {
     const report = assessGeometryQuality(plan());
     expect(report.status).toBe("pass");
     expect(report.metrics.complexWallCount).toBe(1);
+    expect(report.metrics.supportedOpeningRate).toBe(1);
   });
 
   it("blocks room-level product geometry when rooms or scale are missing", () => {
@@ -110,29 +112,47 @@ describe("geometry quality and render contract", () => {
 
   it("preserves polygon-only walls and topology in the future 3D handoff", () => {
     const contract = buildBaytiRenderContract(plan());
-    expect(contract.schemaVersion).toBe("1.1");
+    expect(contract.schemaVersion).toBe("1.2");
     expect(contract.quality.status).toBe("pass");
     expect(contract.walls[0]?.geometry).toBeNull();
     expect(contract.walls[0]?.footprint).toHaveLength(6);
     expect(contract.openings).toHaveLength(1);
+    expect(contract.openings[0]?.supportingWallIds).toEqual(["wall-1"]);
     expect(contract.openings[0]?.connectedRoomIds).toEqual(["room-1"]);
     expect(contract.openings[0]?.connectsToExterior).toBe(true);
     expect(contract.unresolvedOpenings).toHaveLength(0);
     expect(contract.verticalDimensions).toBe("consumer-supplied");
   });
 
-  it("never creates an automatic wall cut for an opening with ambiguous host/width", () => {
+  it("accepts a measured opening bridged across two wall-region fragments", () => {
+    const bridged = plan();
+    bridged.walls.push({ ...bridged.walls[0]!, id: "wall-2" });
+    const opening = bridged.openings[0]!;
+    opening.hostWallId = null;
+    opening.supportingWallIds = ["wall-1", "wall-2"];
+
+    const report = assessGeometryQuality(bridged);
+    const contract = buildBaytiRenderContract(bridged);
+    expect(report.metrics.hostedOpeningRate).toBe(0);
+    expect(report.metrics.supportedOpeningRate).toBe(1);
+    expect(contract.openings).toHaveLength(1);
+    expect(contract.openings[0]?.hostWallId).toBeNull();
+    expect(contract.openings[0]?.supportingWallIds).toEqual(["wall-1", "wall-2"]);
+  });
+
+  it("never creates an automatic wall cut for an opening with ambiguous support/width", () => {
     const ambiguous = plan();
     const opening = ambiguous.openings[0];
     if (!opening) throw new Error("fixture opening missing");
     opening.hostWallId = null;
+    opening.supportingWallIds = [];
     opening.widthMeters = null;
 
     const contract = buildBaytiRenderContract(ambiguous);
     expect(contract.openings).toHaveLength(0);
     expect(contract.unresolvedOpenings[0]?.connectedRoomIds).toEqual(["room-1"]);
     expect(contract.unresolvedOpenings[0]?.reasons).toEqual([
-      "missing-host-wall",
+      "missing-wall-support",
       "missing-physical-width",
     ]);
   });
