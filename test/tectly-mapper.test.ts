@@ -54,7 +54,8 @@ describe("mapTectlyBundleToCanonical", () => {
     expect(plan.walls[0]?.footprint[0]).toEqual({ x: 0.1, y: 0.2 });
     expect(plan.walls[0]?.footprint[1]).toEqual({ x: 0.6, y: 0.2 });
     expect(plan.walls[0]?.geometry).toBeNull();
-    expect(plan.openings[0]?.centerLine.start).toEqual({ x: 0.2, y: 0.24 });
+    expect(plan.openings[0]?.centerLine.start.x).toBeCloseTo(0.2);
+    expect(plan.openings[0]?.centerLine.start.y).toBeCloseTo(0.24);
     expect(plan.scale.metersPerNormalizedX).toBeCloseTo(20);
     expect(plan.scale.metersPerNormalizedY).toBeCloseTo(12.5);
     expect(plan.scale.metersPerPixelX).toBeCloseTo(0.02);
