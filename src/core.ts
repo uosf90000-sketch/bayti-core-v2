@@ -1,12 +1,16 @@
 import type { CanonicalPlan, SourceImageInfo } from "./domain/canonical.js";
 import { fuseTectlyWithReplicate } from "./fusion/fuse.js";
+import {
+  inferOpeningWallSupport,
+  openingWidthMeters,
+} from "./providers/opening-host.js";
 import { ReplicateFloorplanClient } from "./providers/replicate-client.js";
 import { TectlyClient } from "./providers/tectly-client.js";
 import { mapTectlyBundleToCanonical } from "./providers/tectly-mapper.js";
 import type { ReplicateVerifierResult } from "./providers/types.js";
 import { buildBaytiRenderContract, type BaytiRenderContract } from "./render-contract.js";
 
-export const BAYTI_CORE_VERSION = "0.7.0" as const;
+export const BAYTI_CORE_VERSION = "0.8.0" as const;
 
 export type VerifierMode = "best-effort" | "required";
 export type VerifierStatus = "succeeded" | "skipped" | "failed";
@@ -67,6 +71,74 @@ function mapPlans(
     if (verifier !== null) return fuseTectlyWithReplicate(primary, verifier);
     return markVerifierUnavailable(primary, verifierMessage ?? "not configured");
   });
+}
+
+/**
+ * Recomputes only deterministic Core-derived geometry from an already-paid canonical
+ * result. This intentionally makes no provider/network calls, so a result persisted by
+ * an older engine can benefit from newer wall-support/render logic without consuming a
+ * second Tectly or Replicate analysis.
+ */
+function refreshDerivedPlan(plan: CanonicalPlan): CanonicalPlan {
+  let supportedOpeningCount = 0;
+  let hostedOpeningCount = 0;
+  let bridgedOpeningCount = 0;
+  let measuredOpeningCount = 0;
+
+  const openings = plan.openings.map((opening) => {
+    const wallSupport = inferOpeningWallSupport(opening.centerLine, plan.walls, plan.sourceImage);
+    const widthMeters = openingWidthMeters(opening.centerLine, plan.scale);
+
+    if (wallSupport.supportingWallIds.length > 0) supportedOpeningCount += 1;
+    if (wallSupport.hostWallId !== null) hostedOpeningCount += 1;
+    if (wallSupport.supportingWallIds.length === 2) bridgedOpeningCount += 1;
+    if (widthMeters !== null) measuredOpeningCount += 1;
+
+    return {
+      ...opening,
+      hostWallId: wallSupport.hostWallId,
+      supportingWallIds: wallSupport.supportingWallIds,
+      widthMeters,
+    };
+  });
+
+  const notes = plan.qa.notes.filter(
+    (note) =>
+      !note.startsWith("Opening geometry:") &&
+      !note.startsWith("Opening wall support:") &&
+      !note.startsWith("Opening wall support (derived refresh):"),
+  );
+  if (openings.length > 0) {
+    notes.push(
+      `Opening wall support (derived refresh): ${supportedOpeningCount}/${openings.length} openings have unambiguous wall-region support (${hostedOpeningCount} single-footprint, ${bridgedOpeningCount} bridged across two fragments); ${measuredOpeningCount}/${openings.length} have a physical width.`,
+    );
+  }
+
+  return {
+    ...plan,
+    openings,
+    qa: {
+      ...plan.qa,
+      notes,
+    },
+  };
+}
+
+/**
+ * Upgrades an analysis payload stored by an older Core version using only its canonical
+ * geometry. Provider ids/evidence remain untouched; render contracts are rebuilt from
+ * the refreshed plans under the current engine contract.
+ */
+export function refreshDerivedAnalysisResult(
+  result: Omit<BaytiCoreAnalysisResult, "engineVersion"> & { engineVersion: string },
+): BaytiCoreAnalysisResult {
+  const plans = result.plans.map((plan) => refreshDerivedPlan(plan));
+  return {
+    ...result,
+    engineVersion: BAYTI_CORE_VERSION,
+    plans,
+    renderContracts: plans.map((plan) => buildBaytiRenderContract(plan)),
+  };
 }
 
 /**
@@ -169,9 +241,7 @@ export async function analyzeBaytiCore(
     throw new Error("Tectly completed but returned no usable floor plan/floor geometry.");
   }
 
-  const renderContracts = plans.map((plan) => buildBaytiRenderContract(plan));
-
-  return {
+  return refreshDerivedAnalysisResult({
     engineVersion: BAYTI_CORE_VERSION,
     tectlyProjectId: tectlyResult.projectId,
     tectlyDocumentId: tectlyResult.documentId,
@@ -179,6 +249,6 @@ export async function analyzeBaytiCore(
     verifierStatus,
     verifierMessage,
     plans,
-    renderContracts,
-  };
+    renderContracts: [],
+  });
 }
